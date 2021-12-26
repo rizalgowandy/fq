@@ -81,6 +81,7 @@ const (
 	RAW                 = "raw"
 	SLL_PACKET          = "sll_packet"
 	SLL2_PACKET         = "sll2_packet"
+	SQLITE3             = "sqlite3"
 	TAR                 = "tar"
 	TCP_SEGMENT         = "tcp_segment"
 	TIFF                = "tiff"

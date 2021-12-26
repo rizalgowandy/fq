@@ -205,9 +205,11 @@ func (v *Value) postProcess() {
 
 			// TODO: really sort array? if sort it needs to be stable to keep the order
 			// of value with same range start, think null values etc
-			sort.SliceStable(vv.Children, func(i, j int) bool {
-				return (vv.Children)[i].Range.Start < (vv.Children)[j].Range.Start
-			})
+			if !vv.IsArray {
+				sort.SliceStable(vv.Children, func(i, j int) bool {
+					return (vv.Children)[i].Range.Start < (vv.Children)[j].Range.Start
+				})
+			}
 
 			v.Index = -1
 			if vv.IsArray {

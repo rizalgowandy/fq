@@ -33,6 +33,7 @@ import (
 	_ "github.com/wader/fq/format/png"
 	_ "github.com/wader/fq/format/protobuf"
 	_ "github.com/wader/fq/format/raw"
+	_ "github.com/wader/fq/format/sqlite3"
 	_ "github.com/wader/fq/format/tar"
 	_ "github.com/wader/fq/format/tiff"
 	_ "github.com/wader/fq/format/vorbis"

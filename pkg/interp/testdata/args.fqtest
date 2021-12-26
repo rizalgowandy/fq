@@ -129,6 +129,7 @@ pssh_playready       PlayReady PSSH
 raw                  Raw bits
 sll2_packet          Linux cooked capture encapsulation v2
 sll_packet           Linux cooked capture encapsulation
+sqlite3              SQLite v3 database
 tar                  Tar archive
 tcp_segment          Transmission control protocol segment
 tiff                 Tag Image File Format
