@@ -74,6 +74,7 @@ const (
 	OPUS_PACKET         = "opus_packet"
 	PCAP                = "pcap"
 	PCAPNG              = "pcapng"
+	PDF                 = "pdf"
 	PNG                 = "png"
 	PROTOBUF            = "protobuf"
 	PROTOBUF_WIDEVINE   = "protobuf_widevine"
