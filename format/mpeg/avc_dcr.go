@@ -7,48 +7,49 @@ package mpeg
 
 import (
 	"github.com/wader/fq/format"
-	"github.com/wader/fq/format/registry"
 	"github.com/wader/fq/pkg/decode"
+	"github.com/wader/fq/pkg/interp"
 	"github.com/wader/fq/pkg/scalar"
 )
 
 var avcDCRNALFormat decode.Group
 
 func init() {
-	registry.MustRegister(decode.Format{
-		Name:        format.AVC_DCR,
-		Description: "H.264/AVC Decoder Configuration Record",
-		DecodeFn:    avcDcrDecode,
-		Dependencies: []decode.Dependency{
-			{Names: []string{format.AVC_NALU}, Group: &avcDCRNALFormat},
-		},
-	})
+	interp.RegisterFormat(
+		format.AVC_DCR,
+		&decode.Format{
+			Description: "H.264/AVC Decoder Configuration Record",
+			DecodeFn:    avcDcrDecode,
+			Dependencies: []decode.Dependency{
+				{Groups: []*decode.Group{format.AVC_NALU}, Out: &avcDCRNALFormat},
+			},
+		})
 }
 
-var avcProfileNames = scalar.UToSymStr{
-	// 66: "Constrained Baseline Profile", // (CBP, 66 with constraint set 1)
-	66:  "Baseline Profile",
-	88:  "Extended Profile",
-	77:  "Main Profile",
-	100: "High Profile",
+var avcProfileNames = scalar.UintMapSymStr{
+	// 66: "constrained_baseline_profile", // (CBP, 66 with constraint set 1)
+	66:  "baseline_profile",
+	88:  "extended_profile",
+	77:  "main_profile",
+	100: "high_profile",
 	//100: "Constrained High Profile", // (100 with constraint set 4 and 5)
-	110: "High 10 Profile",
-	122: "High 4:2:2 Profile",
-	244: "High 4:4:4 Predictive Profile",
+	110: "high_10_profile",
+	122: "high_422_profile",
+	244: "high_444_predictive_profile",
 	// 110: "High 10 Intra Profile", // (110 with constraint set 3)
 	// 122: "High 4:2:2 Intra Profile", // (122 with constraint set 3)
 	// 244: "High 4:4:4 Intra Profile", // (244 with constraint set 3)
-	44:  "CAVLC 4:4:4 Intra Profile",
-	83:  "Scalable Baseline Profile",
-	86:  "Scalable High Profile",
-	128: "Stereo High Profile",
-	134: "MFC High Profile",
-	138: "Multiview Depth High Profile",
-	139: "Enhanced Multiview Depth High Profile",
+	44:  "cavlc_444_intra_profile",
+	83:  "scalable_baseline_profile",
+	86:  "scalable_high_profile",
+	128: "stereo_high_profile",
+	134: "mfc_high_profile",
+	138: "multiview_depth_high_profile",
+	139: "enhanced_multiview_depth_high_profile",
 }
 
 // TODO: 1b contraint flag 1?
-var avcLevelNames = scalar.UToSymStr{
+var avcLevelNames = scalar.UintMapSymStr{
 	10: "1",
 	//10:  "1b"
 	11: "1.1",
@@ -111,18 +112,18 @@ func avcDcrParameterSet(d *decode.D, numParamSets uint64) {
 	for i := uint64(0); i < numParamSets; i++ {
 		d.FieldStruct("set", func(d *decode.D) {
 			paramSetLen := d.FieldU16("length")
-			d.FieldFormatLen("nal", int64(paramSetLen)*8, avcDCRNALFormat, nil)
+			d.FieldFormatLen("nal", int64(paramSetLen)*8, &avcDCRNALFormat, nil)
 		})
 	}
 }
 
-func avcDcrDecode(d *decode.D, in interface{}) interface{} {
+func avcDcrDecode(d *decode.D) any {
 	d.FieldU8("configuration_version")
 	d.FieldU8("profile_indication", avcProfileNames)
 	d.FieldU8("profile_compatibility")
 	d.FieldU8("level_indication", avcLevelNames)
 	d.FieldU6("reserved0")
-	lengthSize := d.FieldU2("length_size", scalar.UAdd(1))
+	lengthSize := d.FieldU2("length_size", scalar.UintActualAdd(1))
 	d.FieldU3("reserved1")
 	numSeqParamSets := d.FieldU5("num_of_sequence_parameter_sets")
 	d.FieldArray("sequence_parameter_sets", func(d *decode.D) {
@@ -145,5 +146,5 @@ func avcDcrDecode(d *decode.D, in interface{}) interface{} {
 	// TODO: something wrong here, seen files with profileIdc = 100 with no bytes after picture_parameter_sets
 	// https://github.com/FFmpeg/FFmpeg/blob/069d2b4a50a6eb2f925f36884e6b9bd9a1e54670/libavcodec/h264_ps.c#L333
 
-	return format.AvcDcrOut{LengthSize: lengthSize}
+	return format.AVC_DCR_Out{LengthSize: lengthSize}
 }

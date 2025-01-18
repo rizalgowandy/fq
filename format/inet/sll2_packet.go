@@ -5,42 +5,38 @@ package inet
 
 import (
 	"github.com/wader/fq/format"
-	"github.com/wader/fq/format/registry"
 	"github.com/wader/fq/pkg/decode"
+	"github.com/wader/fq/pkg/interp"
 	"github.com/wader/fq/pkg/scalar"
 )
 
-var sllPacket2Ether8023Format decode.Group
+var sllPacket2InetPacketGroup decode.Group
 
 func init() {
-	registry.MustRegister(decode.Format{
-		Name:        format.SLL2_PACKET,
-		Description: "Linux cooked capture encapsulation v2",
-		Groups:      []string{format.LINK_FRAME},
-		Dependencies: []decode.Dependency{
-			{Names: []string{format.ETHER8023_FRAME}, Group: &sllPacket2Ether8023Format},
-		},
-		DecodeFn: decodeSLL2,
-	})
+	interp.RegisterFormat(
+		format.SLL2_Packet,
+		&decode.Format{
+			Description: "Linux cooked capture encapsulation v2",
+			Groups:      []*decode.Group{format.Link_Frame},
+			Dependencies: []decode.Dependency{
+				{Groups: []*decode.Group{format.INET_Packet}, Out: &sllPacket2InetPacketGroup},
+			},
+			DecodeFn: decodeSLL2,
+		})
 }
 
-var sllPacket2FrameTypeFormat = map[uint64]*decode.Group{
-	format.EtherTypeIPv4: &ether8023FrameIPv4Format,
-}
-
-func decodeSLL2(d *decode.D, in interface{}) interface{} {
-	if lsi, ok := in.(format.LinkFrameIn); ok {
-		if lsi.Type != format.LinkTypeLINUX_SLL2 {
-			d.Fatalf("wrong link type")
-		}
+func decodeSLL2(d *decode.D) any {
+	var lfi format.Link_Frame_In
+	if d.ArgAs(&lfi) && lfi.Type != format.LinkTypeLINUX_SLL2 {
+		d.Fatalf("wrong link type %d", lfi.Type)
 	}
 
-	protcolType := d.FieldU16("protocol_type", format.EtherTypeMap, scalar.Hex)
+	protcolType := d.FieldU16("protocol_type", format.EtherTypeMap, scalar.UintHex)
 	d.FieldU16("reserved")
 	d.FieldU32("interface_index")
 	arpHdrType := d.FieldU16("arphdr_type", arpHdrTypeMAp)
 	d.FieldU8("packet_type", sllPacketTypeMap)
-	addressLength := d.FieldU8("link_address_length", d.ValidateURange(0, 8))
+	addressLength := d.FieldU8("link_address_length", d.UintValidateRange(0, 8))
 	// "If there are more than 8 bytes, only the first 8 bytes are present"
 	if addressLength > 8 {
 		addressLength = 8
@@ -55,14 +51,15 @@ func decodeSLL2(d *decode.D, in interface{}) interface{} {
 	// TODO: handle other arphdr types
 	switch arpHdrType {
 	case arpHdrTypeLoopback, arpHdrTypeEther:
-		_ = d.FieldMustGet("link_address").TryScalarFn(mapUToEtherSym, scalar.Hex)
-		if g, ok := sllPacket2FrameTypeFormat[protcolType]; ok {
-			d.FieldFormatLen("data", d.BitsLeft(), *g, nil)
-		} else {
-			d.FieldRawLen("data", d.BitsLeft())
-		}
+		_ = d.FieldMustGet("link_address").TryUintScalarFn(mapUToEtherSym, scalar.UintHex)
+		d.FieldFormatOrRawLen(
+			"payload",
+			d.BitsLeft(),
+			&sllPacket2InetPacketGroup,
+			format.INET_Packet_In{EtherType: int(protcolType)},
+		)
 	default:
-		d.FieldRawLen("data", d.BitsLeft())
+		d.FieldRawLen("payload", d.BitsLeft())
 	}
 
 	return nil

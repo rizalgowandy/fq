@@ -5,15 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/big"
-	"strings"
+	"reflect"
 	"time"
 
-	"github.com/mitchellh/mapstructure"
-	"github.com/wader/fq/internal/bitioextra"
-	"github.com/wader/fq/internal/gojqextra"
-	"github.com/wader/fq/internal/ioextra"
+	"github.com/mitchellh/copystructure"
+	"github.com/wader/fq/internal/bitiox"
+	"github.com/wader/fq/internal/gojqx"
+	"github.com/wader/fq/internal/iox"
+	"github.com/wader/fq/internal/mapstruct"
 	"github.com/wader/fq/pkg/bitio"
 	"github.com/wader/fq/pkg/decode"
 	"github.com/wader/fq/pkg/scalar"
@@ -22,21 +22,9 @@ import (
 )
 
 func init() {
-	functionRegisterFns = append(functionRegisterFns, func(i *Interp) []Function {
-		return []Function{
-			{"_registry", 0, 0, i._registry, nil},
-			{"_tovalue", 1, 1, i._toValue, nil},
-			{"_decode", 2, 2, i._decode, nil},
-		}
-	})
-}
-
-type expectedExtkeyError struct {
-	Key string
-}
-
-func (err expectedExtkeyError) Error() string {
-	return "expected a extkey but got: " + err.Key
+	RegisterFunc0("_registry", (*Interp)._registry)
+	RegisterFunc1("_tovalue", (*Interp)._toValue)
+	RegisterFunc2("_decode", (*Interp)._decode)
 }
 
 // TODO: redo/rename
@@ -48,16 +36,16 @@ type DecodeValue interface {
 	DecodeValue() *decode.Value
 }
 
-func (i *Interp) _registry(c interface{}, a []interface{}) interface{} {
-	uniqueFormats := map[string]decode.Format{}
+func (i *Interp) _registry(c any) any {
+	uniqueFormats := map[string]*decode.Format{}
 
-	groups := map[string]interface{}{}
-	formats := map[string]interface{}{}
+	groups := map[string]any{}
+	formats := map[string]any{}
 
-	for fsName := range i.registry.Groups {
-		var group []interface{}
+	for _, g := range i.Registry.Groups() {
+		var group []any
 
-		for _, f := range i.registry.MustGroup(fsName) {
+		for _, f := range g.Formats {
 			group = append(group, f.Name)
 			if _, ok := uniqueFormats[f.Name]; ok {
 				continue
@@ -65,103 +53,146 @@ func (i *Interp) _registry(c interface{}, a []interface{}) interface{} {
 			uniqueFormats[f.Name] = f
 		}
 
-		groups[fsName] = group
+		groups[g.Name] = group
 	}
 
 	for _, f := range uniqueFormats {
-		vf := map[string]interface{}{
-			"name":        f.Name,
-			"description": f.Description,
-			"probe_order": f.ProbeOrder,
-			"root_name":   f.RootName,
-			"root_array":  f.RootArray,
-			"to_repr":     f.ToRepr,
+		vf := map[string]any{
+			"name":                 f.Name,
+			"description":          f.Description,
+			"probe_order":          f.ProbeOrder,
+			"root_name":            f.RootName,
+			"root_array":           f.RootArray,
+			"skip_decode_function": f.SkipDecodeFunction,
 		}
 
-		var dependenciesVs []interface{}
+		var dependenciesVs []any
 		for _, d := range f.Dependencies {
-			var dNamesVs []interface{}
-			for _, n := range d.Names {
-				dNamesVs = append(dNamesVs, n)
+			var dNamesVs []any
+			for _, g := range d.Groups {
+				dNamesVs = append(dNamesVs, g.Name)
 			}
 			dependenciesVs = append(dependenciesVs, dNamesVs)
 		}
 		if len(dependenciesVs) > 0 {
 			vf["dependencies"] = dependenciesVs
 		}
-		var groupsVs []interface{}
-		for _, n := range f.Groups {
-			groupsVs = append(groupsVs, n)
+		var groupsVs []any
+		for _, g := range f.Groups {
+			groupsVs = append(groupsVs, g.Name)
 		}
 		if len(groupsVs) > 0 {
 			vf["groups"] = groupsVs
 		}
+		if f.DefaultInArg != nil {
+			doc := map[string]any{}
+			st := reflect.TypeOf(f.DefaultInArg)
+			for i := 0; i < st.NumField(); i++ {
+				f := st.Field(i)
+				if v, ok := f.Tag.Lookup("doc"); ok {
+					doc[mapstruct.CamelToSnake(f.Name)] = v
+				}
+			}
+			vf["decode_in_arg_doc"] = doc
 
-		if f.Files != nil {
-			files := map[string]interface{}{}
-
-			entries, err := f.Files.ReadDir(".")
+			args, err := mapstruct.ToMap(f.DefaultInArg)
 			if err != nil {
 				return err
 			}
 
-			for _, e := range entries {
-				f, err := f.Files.Open(e.Name())
-				if err != nil {
-					return err
+			// filter out internal field without documentation
+			for k := range args {
+				if _, ok := doc[k]; !ok {
+					delete(args, k)
 				}
-				b, err := ioutil.ReadAll(f)
-				if err != nil {
-					return err
-				}
-				files[e.Name()] = string(b)
 			}
+			vf["decode_in_arg"] = gojqx.Normalize(args)
+		}
 
-			vf["files"] = files
+		if f.Functions != nil {
+			var ss []any
+			for _, f := range f.Functions {
+				ss = append(ss, f)
+			}
+			vf["functions"] = ss
 		}
 
 		formats[f.Name] = vf
 	}
 
-	return map[string]interface{}{
+	var files []any
+	for _, fs := range i.Registry.FSs {
+		ventries := []any{}
+
+		entries, err := fs.ReadDir(".")
+		if err != nil {
+			return err
+		}
+
+		for _, e := range entries {
+			f, err := fs.Open(e.Name())
+			if err != nil {
+				return err
+			}
+			b, err := io.ReadAll(f)
+			if err != nil {
+				return err
+			}
+
+			ventries = append(ventries, map[string]any{
+				"name": e.Name(),
+				"data": string(b),
+			})
+		}
+
+		files = append(files, ventries)
+	}
+
+	return map[string]any{
 		"groups":  groups,
 		"formats": formats,
+		"files":   files,
 	}
 }
 
-func (i *Interp) _toValue(c interface{}, a []interface{}) interface{} {
-	v, _ := toValue(
-		func() Options { return i.Options(a[0]) },
-		c,
-	)
+func (i *Interp) _toValue(c any, om map[string]any) any {
+	opts, err := OptionsFromValue(om)
+	if err != nil {
+		return err
+	}
+
+	v, err := toValue(func() (*Options, error) { return opts, nil }, c)
+	if err != nil {
+		return err
+	}
 	return v
 }
 
-func (i *Interp) _decode(c interface{}, a []interface{}) interface{} {
-	var opts struct {
-		Filename string                 `mapstructure:"filename"`
-		Force    bool                   `mapstructure:"force"`
-		Progress string                 `mapstructure:"_progress"`
-		Remain   map[string]interface{} `mapstructure:",remain"`
-	}
-	_ = mapstructure.Decode(a[1], &opts)
+type decodeOpts struct {
+	Force    bool
+	Progress string
+	Remain   map[string]any `mapstruct:",remain"`
+}
+
+func (i *Interp) _decode(c any, format string, opts decodeOpts) any {
+	var filename string
 
 	// TODO: progress hack
 	// would be nice to move all progress code into decode but it might be
-	// tricky to keep track of absolute positions in the underlaying readers
+	// tricky to keep track of absolute positions in the underlying readers
 	// when it uses BitBuf slices, maybe only in Pos()?
 	if bbf, ok := c.(*openFile); ok {
-		opts.Filename = bbf.filename
+		filename = bbf.filename
 
 		if opts.Progress != "" {
-			evalProgress := func(c interface{}) {
+			evalProgress := func(c any) {
 				// {approx_read_bytes: 123, total_size: 123} | opts.Progress
 				_, _ = i.EvalFuncValues(
-					i.evalInstance.ctx,
+					i.EvalInstance.Ctx,
 					c,
 					opts.Progress,
 					nil,
-					EvalOpts{output: ioextra.DiscardCtxWriter{Ctx: i.evalInstance.ctx}},
+					EvalOpts{output: iox.DiscardCtxWriter{Ctx: i.EvalInstance.Ctx}},
 				)
 			}
 			lastProgress := time.Now()
@@ -173,7 +204,7 @@ func (i *Interp) _decode(c interface{}, a []interface{}) interface{} {
 				}
 				lastProgress = n
 				evalProgress(
-					map[string]interface{}{
+					map[string]any{
 						"approx_read_bytes": approxReadBytes,
 						"total_size":        totalSize,
 					},
@@ -192,29 +223,47 @@ func (i *Interp) _decode(c interface{}, a []interface{}) interface{} {
 		return err
 	}
 
-	formatName, err := toString(a[0])
+	formatName, err := toString(format)
 	if err != nil {
 		return err
 	}
-	decodeFormat, err := i.registry.Group(formatName)
+	decodeGroup, err := i.Registry.Group(formatName)
 	if err != nil {
 		return err
 	}
 
-	dv, _, err := decode.Decode(i.evalInstance.ctx, bv.br, decodeFormat,
+	dv, formatOut, err := decode.Decode(i.EvalInstance.Ctx, bv.br, decodeGroup,
 		decode.Options{
-			IsRoot:        true,
-			FillGaps:      true,
-			Force:         opts.Force,
-			Range:         bv.r,
-			Description:   opts.Filename,
-			FormatOptions: opts.Remain,
+			IsRoot:      true,
+			FillGaps:    true,
+			Force:       opts.Force,
+			Range:       bv.r,
+			Description: filename,
+			ParseOptsFn: func(init any) any {
+				v, err := copystructure.Copy(init)
+				if err != nil {
+					return nil
+				}
+
+				if len(opts.Remain) > 0 {
+					if err := mapstruct.ToStruct(opts.Remain, &v); err != nil {
+						// TODO: currently ignores failed struct mappings
+						return nil
+					}
+				}
+				// nil if same as init
+				if reflect.DeepEqual(init, v) {
+					return nil
+				}
+
+				return v
+			},
 		},
 	)
 	if dv == nil {
 		var decodeFormatsErr decode.FormatsError
 		if errors.As(err, &decodeFormatsErr) {
-			var vs []interface{}
+			var vs []any
 			for _, fe := range decodeFormatsErr.Errs {
 				vs = append(vs, fe.Value())
 			}
@@ -225,124 +274,162 @@ func (i *Interp) _decode(c interface{}, a []interface{}) interface{} {
 		return valueError{err}
 	}
 
-	return makeDecodeValue(dv)
-}
+	var formatOutMap any
 
-func valueKey(name string, a, b func(name string) interface{}) interface{} {
-	if strings.HasPrefix(name, "_") {
-		return a(name)
-	}
-	return b(name)
-}
-func valueHas(key interface{}, a func(name string) interface{}, b func(key interface{}) interface{}) interface{} {
-	stringKey, ok := key.(string)
-	if ok && strings.HasPrefix(stringKey, "_") {
-		if err, ok := a(stringKey).(error); ok {
+	if formatOut != nil {
+		formatOutMap, err = mapstruct.ToMap(formatOut)
+		if err != nil {
 			return err
 		}
-		return true
 	}
-	return b(key)
+
+	return makeDecodeValueOut(dv, decodeValueValue, formatOutMap)
 }
 
-// optsFn is a function as toValue is used by tovalue/0 so needs to be fast
-func toValue(optsFn func() Options, v interface{}) (interface{}, bool) {
-	switch v := v.(type) {
-	case JQValueEx:
-		return v.JQValueToGoJQEx(optsFn), true
-	case gojq.JQValue:
-		return v.JQValueToGoJQ(), true
-	case nil, bool, float64, int, string, *big.Int, map[string]interface{}, []interface{}:
-		return v, true
-	default:
-		return nil, false
+func valueOrFallbackKey(name string, baseKey func(name string) any, valueHas func(key any) any, valueKey func(name string) any) any {
+	v := valueHas(name)
+	if b, ok := v.(bool); ok && b {
+		return valueKey(name)
 	}
+	return baseKey(name)
+}
+func valueOrFallbackHas(key any, baseHas func(key any) any, valueHas func(key any) any) any {
+	v := valueHas(key)
+	if b, ok := v.(bool); ok && !b {
+		return baseHas(key)
+	}
+	return v
 }
 
-func makeDecodeValue(dv *decode.Value) interface{} {
+// TODO: make more efficient somehow? shallow values but might be hard
+// when things like tovalue.key should behave like a jq value and not a decode value etc
+func toValue(optsFn func() (*Options, error), v any) (any, error) {
+	return gojqx.ToGoJQValueFn(v, func(v any) (any, error) {
+		switch v := v.(type) {
+		case JQValueEx:
+			if optsFn == nil {
+				return v.JQValueToGoJQ(), nil
+			}
+			return v.JQValueToGoJQEx(optsFn), nil
+		case gojq.JQValue:
+			return v.JQValueToGoJQ(), nil
+		default:
+			return v, nil
+		}
+	})
+}
+
+type decodeValueKind int
+
+const (
+	decodeValueValue decodeValueKind = iota
+	decodeValueActual
+	decodeValueSym
+)
+
+func makeDecodeValue(dv *decode.Value, kind decodeValueKind) any {
+	return makeDecodeValueOut(dv, kind, nil)
+}
+
+func makeDecodeValueOut(dv *decode.Value, kind decodeValueKind, out any) any {
 	switch vv := dv.V.(type) {
 	case *decode.Compound:
 		if vv.IsArray {
-			return NewArrayDecodeValue(dv, vv)
+			return NewArrayDecodeValue(dv, out, vv)
 		}
-		return NewStructDecodeValue(dv, vv)
-	case *scalar.S:
-		switch vv := vv.Value().(type) {
+		return NewStructDecodeValue(dv, out, vv)
+
+	case scalar.Scalarable:
+		// TODO: rethink value/actual/sym handling
+		var vvv any
+		switch kind {
+		case decodeValueValue:
+			vvv = vv.ScalarValue()
+		case decodeValueActual:
+			vvv = vv.ScalarActual()
+		case decodeValueSym:
+			vvv = vv.ScalarSym()
+		}
+
+		switch vvv := vvv.(type) {
 		case bitio.ReaderAtSeeker:
 			// is lazy so that in situations where the decode value is only used to
 			// create another binary we don't have to read and create a string, ex:
 			// .unknown0 | tobytes[1:] | ...
 			return decodeValue{
-				JQValue: &gojqextra.Lazy{
+				JQValue: &gojqx.Lazy{
 					Type:     "string",
 					IsScalar: true,
 					Fn: func() (gojq.JQValue, error) {
 						buf := &bytes.Buffer{}
-						vvC, err := bitioextra.Clone(vv)
+						vvvC, err := bitio.CloneReader(vvv)
 						if err != nil {
 							return nil, err
 						}
-						if _, err := bitioextra.CopyBits(buf, vvC); err != nil {
+						if _, err := bitiox.CopyBits(buf, vvvC); err != nil {
 							return nil, err
 						}
-						return gojqextra.String([]rune(buf.String())), nil
+						return gojqx.String([]rune(buf.String())), nil
 					},
 				},
-				decodeValueBase: decodeValueBase{dv},
-				bitsFormat:      true,
+				decodeValueBase: decodeValueBase{dv: dv},
+				isRaw:           true,
 			}
 		case bool:
 			return decodeValue{
-				JQValue:         gojqextra.Boolean(vv),
-				decodeValueBase: decodeValueBase{dv},
+				JQValue:         gojqx.Boolean(vvv),
+				decodeValueBase: decodeValueBase{dv: dv},
 			}
 		case int:
 			return decodeValue{
-				JQValue:         gojqextra.Number{V: vv},
-				decodeValueBase: decodeValueBase{dv},
+				JQValue:         gojqx.Number{V: vvv},
+				decodeValueBase: decodeValueBase{dv: dv},
 			}
 		case int64:
 			return decodeValue{
-				JQValue:         gojqextra.Number{V: big.NewInt(vv)},
-				decodeValueBase: decodeValueBase{dv},
+				JQValue:         gojqx.Number{V: big.NewInt(vvv)},
+				decodeValueBase: decodeValueBase{dv: dv},
 			}
 		case uint64:
 			return decodeValue{
-				JQValue:         gojqextra.Number{V: new(big.Int).SetUint64(vv)},
-				decodeValueBase: decodeValueBase{dv},
+				JQValue:         gojqx.Number{V: new(big.Int).SetUint64(vvv)},
+				decodeValueBase: decodeValueBase{dv: dv},
 			}
 		case float64:
 			return decodeValue{
-				JQValue:         gojqextra.Number{V: vv},
-				decodeValueBase: decodeValueBase{dv},
+				JQValue:         gojqx.Number{V: vvv},
+				decodeValueBase: decodeValueBase{dv: dv},
 			}
 		case string:
 			return decodeValue{
-				JQValue:         gojqextra.String(vv),
-				decodeValueBase: decodeValueBase{dv},
+				JQValue:         gojqx.String(vvv),
+				decodeValueBase: decodeValueBase{dv: dv},
 			}
-		case []interface{}:
+		case []any:
 			return decodeValue{
-				JQValue:         gojqextra.Array(vv),
-				decodeValueBase: decodeValueBase{dv},
+				JQValue:         gojqx.Array(vvv),
+				decodeValueBase: decodeValueBase{dv: dv},
 			}
-		case map[string]interface{}:
+		case map[string]any:
 			return decodeValue{
-				JQValue:         gojqextra.Object(vv),
-				decodeValueBase: decodeValueBase{dv},
+				JQValue:         gojqx.Object(vvv),
+				decodeValueBase: decodeValueBase{dv: dv},
 			}
 		case nil:
 			return decodeValue{
-				JQValue:         gojqextra.Null{},
-				decodeValueBase: decodeValueBase{dv},
+				JQValue:         gojqx.Null{},
+				decodeValueBase: decodeValueBase{dv: dv},
 			}
 		case *big.Int:
 			return decodeValue{
-				JQValue:         gojqextra.Number{V: vv},
-				decodeValueBase: decodeValueBase{dv},
+				JQValue:         gojqx.Number{V: vvv},
+				decodeValueBase: decodeValueBase{dv: dv},
 			}
+		case Binary:
+			return vvv
+
 		default:
-			panic(fmt.Sprintf("unreachable vv %#+v", vv))
+			panic(fmt.Sprintf("unreachable vv %#+v", vvv))
 		}
 	default:
 		panic(fmt.Sprintf("unreachable dv %#+v", dv))
@@ -350,98 +437,109 @@ func makeDecodeValue(dv *decode.Value) interface{} {
 }
 
 type decodeValueBase struct {
-	dv *decode.Value
+	dv  *decode.Value
+	out any
 }
 
 func (dvb decodeValueBase) DecodeValue() *decode.Value {
 	return dvb.dv
 }
 
-func (dvb decodeValueBase) Display(w io.Writer, opts Options) error { return dump(dvb.dv, w, opts) }
+func (dvb decodeValueBase) Display(w io.Writer, opts *Options) error { return dump(dvb.dv, w, opts) }
 func (dvb decodeValueBase) ToBinary() (Binary, error) {
+	if s, ok := dvb.dv.V.(scalar.Scalarable); ok && s.ScalarFlags().IsSynthetic() {
+		return Binary{}, fmt.Errorf("synthetic value can't be a binary")
+	}
 	return Binary{br: dvb.dv.RootReader, r: dvb.dv.InnerRange(), unit: 8}, nil
 }
 func (decodeValueBase) ExtType() string { return "decode_value" }
 func (dvb decodeValueBase) ExtKeys() []string {
-	kv := []string{
-		"_start",
-		"_stop",
+	return []string{
+		"_actual",
+		"_bits",
+		"_buffer_root",
+		"_bytes",
+		"_description",
+		"_error",
+		"_format_root",
+		"_format",
+		"_gap",
+		"_index",
 		"_len",
 		"_name",
-		"_root",
-		"_buffer_root",
-		"_format_root",
+		"_out",
 		"_parent",
-		"_actual",
-		"_sym",
-		"_description",
 		"_path",
-		"_bits",
-		"_bytes",
-		"_unknown",
-		"_index", // TODO: only if parent is array?
+		"_root",
+		"_start",
+		"_stop",
+		"_sym",
 	}
-
-	if _, ok := dvb.dv.V.(*decode.Compound); ok {
-		kv = append(kv,
-			"_error",
-			"_format",
-		)
-
-		if dvb.dv.Index != -1 {
-			kv = append(kv, "_index")
-		}
-	}
-
-	return kv
 }
 
-func (dvb decodeValueBase) JQValueKey(name string) interface{} {
+func (dvb decodeValueBase) JQValueHas(key any) any {
+	name, ok := key.(string)
+	if !ok {
+		return false
+	}
+
+	switch name {
+	case "_actual",
+		"_bits",
+		"_buffer_root",
+		"_bytes",
+		"_description",
+		"_error",
+		"_format_root",
+		"_format",
+		"_gap",
+		"_index",
+		"_len",
+		"_name",
+		"_out",
+		"_parent",
+		"_path",
+		"_root",
+		"_start",
+		"_stop",
+		"_sym":
+		return true
+	}
+
+	return false
+}
+
+func (dvb decodeValueBase) JQValueKey(name string) any {
 	dv := dvb.dv
 
 	switch name {
-	case "_start":
-		return big.NewInt(dv.Range.Start)
-	case "_stop":
-		return big.NewInt(dv.Range.Stop())
-	case "_len":
-		return big.NewInt(dv.Range.Len)
-	case "_name":
-		return dv.Name
-	case "_root":
-		return makeDecodeValue(dv.Root())
+	case "_actual":
+		switch dv.V.(type) {
+		case scalar.Scalarable:
+			return makeDecodeValue(dv, decodeValueActual)
+		default:
+			return nil
+		}
+	case "_bits":
+		if s, ok := dv.V.(scalar.Scalarable); ok && s.ScalarFlags().IsSynthetic() {
+			return nil
+		}
+		return Binary{
+			br:   dv.RootReader,
+			r:    dv.Range,
+			unit: 1,
+		}
 	case "_buffer_root":
 		// TODO: rename?
-		return makeDecodeValue(dv.BufferRoot())
-	case "_format_root":
-		// TODO: rename?
-		return makeDecodeValue(dv.FormatRoot())
-	case "_parent":
-		if dv.Parent == nil {
+		return makeDecodeValue(dv.BufferRoot(), decodeValueValue)
+	case "_bytes":
+		if s, ok := dv.V.(scalar.Scalarable); ok && s.ScalarFlags().IsSynthetic() {
 			return nil
 		}
-		return makeDecodeValue(dv.Parent)
-	case "_actual":
-		switch vv := dv.V.(type) {
-		case *scalar.S:
-			jv, ok := gojqextra.ToGoJQValue(vv.Actual)
-			if !ok {
-				return fmt.Errorf("can't convert actual value jq value %#+v", vv.Actual)
-			}
-			return jv
-		default:
-			return nil
-		}
-	case "_sym":
-		switch vv := dv.V.(type) {
-		case *scalar.S:
-			jv, ok := gojqextra.ToGoJQValue(vv.Sym)
-			if !ok {
-				return fmt.Errorf("can't convert sym value jq value %#+v", vv.Actual)
-			}
-			return jv
-		default:
-			return nil
+		return Binary{
+			br:   dv.RootReader,
+			r:    dv.Range,
+			unit: 8,
 		}
 	case "_description":
 		switch vv := dv.V.(type) {
@@ -450,72 +548,71 @@ func (dvb decodeValueBase) JQValueKey(name string) interface{} {
 				return nil
 			}
 			return vv.Description
-		case *scalar.S:
-			if vv.Description == "" {
+		case scalar.Scalarable:
+			desc := vv.ScalarDescription()
+			if desc == "" {
 				return nil
 			}
-			return vv.Description
+			return desc
 		default:
 			return nil
 		}
-	case "_path":
-		return valuePath(dv)
-	case "_error":
+	case "_format_root":
+		// TODO: rename?
+		return makeDecodeValue(dv.FormatRoot(), decodeValueValue)
+	case "_gap":
 		switch vv := dv.V.(type) {
-		case *decode.Compound:
-			var formatErr decode.FormatError
-			if errors.As(vv.Err, &formatErr) {
-				return formatErr.Value()
-
-			}
-			return vv.Err
-		default:
-			return nil
-		}
-	case "_bits":
-		return Binary{
-			br:   dv.RootReader,
-			r:    dv.Range,
-			unit: 1,
-		}
-	case "_bytes":
-		return Binary{
-			br:   dv.RootReader,
-			r:    dv.Range,
-			unit: 8,
-		}
-	case "_format":
-		switch vv := dv.V.(type) {
-		case *decode.Compound:
-			if vv.Format != nil {
-				return vv.Format.Name
-			}
-			return nil
-		case *scalar.S:
-			// TODO: hack, Scalar interface?
-			switch vv.Actual.(type) {
-			case map[string]interface{}, []interface{}:
-				return "json"
-			default:
-				return nil
-			}
-		default:
-			return nil
-		}
-	case "_unknown":
-		switch vv := dv.V.(type) {
-		case *scalar.S:
-			return vv.Unknown
+		case scalar.Scalarable:
+			return vv.ScalarFlags().IsGap()
 		default:
 			return false
 		}
+	case "_len":
+		return big.NewInt(dv.Range.Len)
+	case "_name":
+		return dv.Name
+	case "_parent":
+		if dv.Parent == nil {
+			return nil
+		}
+		return makeDecodeValue(dv.Parent, decodeValueValue)
+	case "_path":
+		return valuePath(dv)
+	case "_root":
+		return makeDecodeValue(dv.Root(), decodeValueValue)
+	case "_start":
+		return big.NewInt(dv.Range.Start)
+	case "_stop":
+		return big.NewInt(dv.Range.Stop())
+	case "_sym":
+		switch dv.V.(type) {
+		case scalar.Scalarable:
+			return makeDecodeValue(dv, decodeValueSym)
+		default:
+			return nil
+		}
+
+	case "_error":
+		var formatErr decode.FormatError
+		if errors.As(dv.Err, &formatErr) {
+			return formatErr.Value()
+		}
+		return nil
+	case "_format":
+		if dv.Format != nil {
+			return dv.Format.Name
+		}
+		return nil
+	case "_out":
+		return dvb.out
+
 	case "_index":
 		if dv.Index != -1 {
 			return dv.Index
 		}
 	}
 
-	return expectedExtkeyError{Key: name}
+	return nil
 }
 
 var _ DecodeValue = decodeValue{}
@@ -523,39 +620,30 @@ var _ DecodeValue = decodeValue{}
 type decodeValue struct {
 	gojq.JQValue
 	decodeValueBase
-	bitsFormat bool
+	isRaw bool
 }
 
-func (v decodeValue) JQValueKey(name string) interface{} {
-	return valueKey(name, v.decodeValueBase.JQValueKey, v.JQValue.JQValueKey)
+func (v decodeValue) JQValueKey(name string) any {
+	return valueOrFallbackKey(name, v.decodeValueBase.JQValueKey, v.JQValue.JQValueHas, v.JQValue.JQValueKey)
 }
-func (v decodeValue) JQValueHas(key interface{}) interface{} {
-	return valueHas(key, v.decodeValueBase.JQValueKey, v.JQValue.JQValueHas)
+func (v decodeValue) JQValueHas(key any) any {
+	return valueOrFallbackHas(key, v.decodeValueBase.JQValueHas, v.JQValue.JQValueHas)
 }
-func (v decodeValue) JQValueToGoJQEx(optsFn func() Options) interface{} {
-	if !v.bitsFormat {
+func (v decodeValue) JQValueToGoJQEx(optsFn func() (*Options, error)) any {
+	if !v.isRaw {
 		return v.JQValueToGoJQ()
 	}
 
-	bv, err := v.decodeValueBase.ToBinary()
-	if err != nil {
-		return err
-	}
-	br, err := bv.toReader()
-	if err != nil {
-		return err
-	}
-
-	brC, err := bitioextra.Clone(br)
-	if err != nil {
-		return err
+	if s, ok := v.dv.V.(scalar.Scalarable); ok && !s.ScalarFlags().IsSynthetic() {
+		bv, err := v.ToBinary()
+		if err != nil {
+			return err
+		}
+		return bv.JQValueToGoJQEx(optsFn)
 	}
 
-	s, err := optsFn().BitsFormatFn(brC)
-	if err != nil {
-		return err
-	}
-	return s
+	return v.JQValueToGoJQ()
+
 }
 
 // decode value array
@@ -563,73 +651,86 @@ func (v decodeValue) JQValueToGoJQEx(optsFn func() Options) interface{} {
 var _ DecodeValue = ArrayDecodeValue{}
 
 type ArrayDecodeValue struct {
-	gojqextra.Base
+	gojqx.Base
 	decodeValueBase
 	*decode.Compound
 }
 
-func NewArrayDecodeValue(dv *decode.Value, c *decode.Compound) ArrayDecodeValue {
+func NewArrayDecodeValue(dv *decode.Value, out any, c *decode.Compound) ArrayDecodeValue {
 	return ArrayDecodeValue{
-		decodeValueBase: decodeValueBase{dv},
-		Base:            gojqextra.Base{Typ: "array"},
+		decodeValueBase: decodeValueBase{dv: dv, out: out},
+		Base:            gojqx.Base{Typ: gojq.JQTypeArray},
 		Compound:        c,
 	}
 }
 
-func (v ArrayDecodeValue) JQValueKey(name string) interface{} {
-	return valueKey(name, v.decodeValueBase.JQValueKey, v.Base.JQValueKey)
+func (v ArrayDecodeValue) JQValueKey(name string) any {
+	return valueOrFallbackKey(name, v.decodeValueBase.JQValueKey, v.Base.JQValueHas, v.Base.JQValueKey)
 }
-func (v ArrayDecodeValue) JQValueSliceLen() interface{} { return len(v.Compound.Children) }
-func (v ArrayDecodeValue) JQValueLength() interface{}   { return len(v.Compound.Children) }
-func (v ArrayDecodeValue) JQValueIndex(index int) interface{} {
+func (v ArrayDecodeValue) JQValueSliceLen() any { return len(v.Compound.Children) }
+func (v ArrayDecodeValue) JQValueLength() any   { return len(v.Compound.Children) }
+func (v ArrayDecodeValue) JQValueIndex(index int) any {
 	// -1 outside after string, -2 outside before string
 	if index < 0 {
 		return nil
 	}
-	return makeDecodeValue((v.Compound.Children)[index])
+	return makeDecodeValue((v.Compound.Children)[index], decodeValueValue)
 }
-func (v ArrayDecodeValue) JQValueSlice(start int, end int) interface{} {
-	vs := make([]interface{}, end-start)
+func (v ArrayDecodeValue) JQValueSlice(start int, end int) any {
+	vs := make([]any, end-start)
 	for i, e := range (v.Compound.Children)[start:end] {
-		vs[i] = makeDecodeValue(e)
+		vs[i] = makeDecodeValue(e, decodeValueValue)
 	}
 	return vs
 }
-func (v ArrayDecodeValue) JQValueUpdate(key interface{}, u interface{}, delpath bool) interface{} {
-	return gojqextra.NonUpdatableTypeError{Key: fmt.Sprintf("%v", key), Typ: "array"}
-}
-func (v ArrayDecodeValue) JQValueEach() interface{} {
+func (v ArrayDecodeValue) JQValueEach() any {
 	props := make([]gojq.PathValue, len(v.Compound.Children))
 	for i, f := range v.Compound.Children {
-		props[i] = gojq.PathValue{Path: i, Value: makeDecodeValue(f)}
+		props[i] = gojq.PathValue{Path: i, Value: makeDecodeValue(f, decodeValueValue)}
 	}
 	return props
 }
-func (v ArrayDecodeValue) JQValueKeys() interface{} {
-	vs := make([]interface{}, len(v.Compound.Children))
+func (v ArrayDecodeValue) JQValueKeys() any {
+	vs := make([]any, len(v.Compound.Children))
 	for i := range v.Compound.Children {
 		vs[i] = i
 	}
 	return vs
 }
-func (v ArrayDecodeValue) JQValueHas(key interface{}) interface{} {
-	return valueHas(
+func (v ArrayDecodeValue) JQValueHas(key any) any {
+	return valueOrFallbackHas(
 		key,
-		v.decodeValueBase.JQValueKey,
-		func(key interface{}) interface{} {
+		v.decodeValueBase.JQValueHas,
+		func(key any) any {
 			intKey, ok := key.(int)
 			if !ok {
-				return gojqextra.HasKeyTypeError{L: "array", R: fmt.Sprintf("%v", key)}
+				return gojqx.HasKeyTypeError{L: gojq.JQTypeArray, R: fmt.Sprintf("%v", key)}
 			}
 			return intKey >= 0 && intKey < len(v.Compound.Children)
 		})
 }
-func (v ArrayDecodeValue) JQValueToGoJQ() interface{} {
-	vs := make([]interface{}, len(v.Compound.Children))
-	for i, f := range v.Compound.Children {
-		vs[i] = makeDecodeValue(f)
+func (v ArrayDecodeValue) JQValueToGoJQEx(optsFn func() (*Options, error)) any {
+	opts, err := optsFn()
+	if err != nil {
+		return err
+	}
+
+	vs := make([]any, 0, len(v.Compound.Children))
+	for _, f := range v.Compound.Children {
+		switch s := f.V.(type) {
+		case scalar.Scalarable:
+			if s.ScalarFlags().IsGap() && opts.SkipGaps {
+				// skip, note for arrays this will affect indexes
+				continue
+			}
+		}
+
+		vs = append(vs, makeDecodeValue(f, decodeValueValue))
 	}
 	return vs
+}
+func (v ArrayDecodeValue) JQValueToGoJQ() any {
+	return v.JQValueToGoJQEx(func() (*Options, error) { return &Options{}, nil })
 }
 
 // decode value struct
@@ -637,72 +738,101 @@ func (v ArrayDecodeValue) JQValueToGoJQ() interface{} {
 var _ DecodeValue = StructDecodeValue{}
 
 type StructDecodeValue struct {
-	gojqextra.Base
+	gojqx.Base
 	decodeValueBase
 	*decode.Compound
 }
 
-func NewStructDecodeValue(dv *decode.Value, c *decode.Compound) StructDecodeValue {
+func NewStructDecodeValue(dv *decode.Value, out any, c *decode.Compound) StructDecodeValue {
 	return StructDecodeValue{
-		decodeValueBase: decodeValueBase{dv},
-		Base:            gojqextra.Base{Typ: "object"},
+		decodeValueBase: decodeValueBase{dv: dv, out: out},
+		Base:            gojqx.Base{Typ: gojq.JQTypeObject},
 		Compound:        c,
 	}
 }
 
-func (v StructDecodeValue) JQValueLength() interface{}   { return len(v.Compound.Children) }
-func (v StructDecodeValue) JQValueSliceLen() interface{} { return len(v.Compound.Children) }
-func (v StructDecodeValue) JQValueKey(name string) interface{} {
-	if strings.HasPrefix(name, "_") {
-		return v.decodeValueBase.JQValueKey(name)
-	}
-
-	for _, f := range v.Compound.Children {
-		if f.Name == name {
-			return makeDecodeValue(f)
-		}
-	}
-	return nil
-}
-func (v StructDecodeValue) JQValueUpdate(key interface{}, u interface{}, delpath bool) interface{} {
-	return gojqextra.NonUpdatableTypeError{Key: fmt.Sprintf("%v", key), Typ: "object"}
-}
-func (v StructDecodeValue) JQValueEach() interface{} {
-	props := make([]gojq.PathValue, len(v.Compound.Children))
-	for i, f := range v.Compound.Children {
-		props[i] = gojq.PathValue{Path: f.Name, Value: makeDecodeValue(f)}
-	}
-	return props
-}
-func (v StructDecodeValue) JQValueKeys() interface{} {
-	vs := make([]interface{}, len(v.Compound.Children))
-	for i, f := range v.Compound.Children {
-		vs[i] = f.Name
-	}
-	return vs
-}
-func (v StructDecodeValue) JQValueHas(key interface{}) interface{} {
-	return valueHas(
-		key,
+func (v StructDecodeValue) JQValueLength() any   { return len(v.Compound.Children) }
+func (v StructDecodeValue) JQValueSliceLen() any { return len(v.Compound.Children) }
+func (v StructDecodeValue) JQValueKey(name string) any {
+	return valueOrFallbackKey(
+		name,
 		v.decodeValueBase.JQValueKey,
-		func(key interface{}) interface{} {
+		func(key any) any {
 			stringKey, ok := key.(string)
 			if !ok {
-				return gojqextra.HasKeyTypeError{L: "object", R: fmt.Sprintf("%v", key)}
+				return false
 			}
-			for _, f := range v.Compound.Children {
-				if f.Name == stringKey {
+			if v.Compound.ByName != nil {
+				if _, ok := v.Compound.ByName[stringKey]; ok {
 					return true
 				}
 			}
 			return false
 		},
+		func(name string) any {
+			if v.Compound.ByName != nil {
+				if f, ok := v.Compound.ByName[name]; ok {
+					return makeDecodeValue(f, decodeValueValue)
+				}
+			}
+
+			return nil
+		},
 	)
 }
-func (v StructDecodeValue) JQValueToGoJQ() interface{} {
-	vm := make(map[string]interface{}, len(v.Compound.Children))
+func (v StructDecodeValue) JQValueEach() any {
+	props := make([]gojq.PathValue, len(v.Compound.Children))
+	for i, f := range v.Compound.Children {
+		props[i] = gojq.PathValue{Path: f.Name, Value: makeDecodeValue(f, decodeValueValue)}
+	}
+	return props
+}
+func (v StructDecodeValue) JQValueKeys() any {
+	vs := make([]any, len(v.Compound.Children))
+	for i, f := range v.Compound.Children {
+		vs[i] = f.Name
+	}
+	return vs
+}
+func (v StructDecodeValue) JQValueHas(key any) any {
+	return valueOrFallbackHas(
+		key,
+		v.decodeValueBase.JQValueHas,
+		func(key any) any {
+			stringKey, ok := key.(string)
+			if !ok {
+				return gojqx.HasKeyTypeError{L: gojq.JQTypeObject, R: fmt.Sprintf("%v", key)}
+			}
+
+			if v.Compound.ByName != nil {
+				if _, ok := v.Compound.ByName[stringKey]; ok {
+					return true
+				}
+			}
+
+			return false
+		},
+	)
+}
+func (v StructDecodeValue) JQValueToGoJQEx(optsFn func() (*Options, error)) any {
+	opts, err := optsFn()
+	if err != nil {
+		return err
+	}
+
+	vm := make(map[string]any, len(v.Compound.Children))
 	for _, f := range v.Compound.Children {
-		vm[f.Name] = makeDecodeValue(f)
+		switch s := f.V.(type) {
+		case scalar.Scalarable:
+			if s.ScalarFlags().IsGap() && opts.SkipGaps {
+				continue
+			}
+		}
+
+		vm[f.Name] = makeDecodeValue(f, decodeValueValue)
 	}
 	return vm
+}
+func (v StructDecodeValue) JQValueToGoJQ() any {
+	return v.JQValueToGoJQEx(func() (*Options, error) { return &Options{}, nil })
 }

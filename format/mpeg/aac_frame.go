@@ -8,19 +8,23 @@ package mpeg
 
 import (
 	"github.com/wader/fq/format"
-	"github.com/wader/fq/format/registry"
 	"github.com/wader/fq/pkg/decode"
+	"github.com/wader/fq/pkg/interp"
 	"github.com/wader/fq/pkg/scalar"
 )
 
 func init() {
-	registry.MustRegister(decode.Format{
-		Name:        format.AAC_FRAME,
-		Description: "Advanced Audio Coding frame",
-		DecodeFn:    aacDecode,
-		RootArray:   true,
-		RootName:    "elements",
-	})
+	interp.RegisterFormat(
+		format.AAC_Frame,
+		&decode.Format{
+			Description: "Advanced Audio Coding frame",
+			DecodeFn:    aacDecode,
+			DefaultInArg: format.AAC_Frame_In{
+				ObjectType: format.MPEGAudioObjectTypeMain,
+			},
+			RootArray: true,
+			RootName:  "elements",
+		})
 }
 
 const (
@@ -34,7 +38,7 @@ const (
 	TERM = 0b111
 )
 
-var syntaxElementNames = scalar.UToSymStr{
+var syntaxElementNames = scalar.UintMapSymStr{
 	SCE:  "SCE",
 	CPE:  "CPE",
 	CCE:  "CCE",
@@ -45,7 +49,6 @@ var syntaxElementNames = scalar.UToSymStr{
 	TERM: "TERM",
 }
 
-//nolint:revive
 const (
 	EXT_FILL          = 0x0
 	EXT_FILL_DATA     = 0x1
@@ -55,7 +58,7 @@ const (
 	EXT_SBR_DATA_CRC  = 0xe
 )
 
-var extensionPayloadIDNames = scalar.UToSymStr{
+var extensionPayloadIDNames = scalar.UintMapSymStr{
 	EXT_FILL:          "EXT_FILL",
 	EXT_FILL_DATA:     "EXT_FILL_DATA",
 	EXT_DATA_ELEMENT:  "EXT_DATA_ELEMENT",
@@ -64,7 +67,6 @@ var extensionPayloadIDNames = scalar.UToSymStr{
 	EXT_SBR_DATA_CRC:  "EXT_SBR_DATA_CRC",
 }
 
-//nolint:revive
 const (
 	ONLY_LONG_SEQUENCE   = 0x0
 	LONG_START_SEQUENCE  = 0x1
@@ -72,7 +74,7 @@ const (
 	LONG_STOP_SEQUENCE   = 0x3
 )
 
-var windowSequenceNames = scalar.UToSymStr{
+var windowSequenceNames = scalar.UintMapSymStr{
 	ONLY_LONG_SEQUENCE:   "ONLY_LONG_SEQUENCE",
 	LONG_START_SEQUENCE:  "LONG_START_SEQUENCE",
 	EIGHT_SHORT_SEQUENCE: "EIGHT_SHORT_SEQUENCE",
@@ -158,6 +160,15 @@ func aacIndividualChannelStream(d *decode.D, objectType int, commonWindow bool, 
 			aacICSInfo(d, objectType)
 		})
 	}
+}
+
+func aacChannelPairElement(d *decode.D) {
+	d.FieldU4("element_instance_tag")
+	d.FieldBool("common_window")
+	// TODO:
+	// if commonWindow ...
+	// aacIndividualChannelStream
+	// aacIndividualChannelStream
 }
 
 func aacSingleChannelElement(d *decode.D, objectType int) {
@@ -251,7 +262,7 @@ func aacFillElement(d *decode.D) {
 			cnt += escCount - 1
 		}
 	})
-	d.FieldValueU("payload_length", cnt)
+	d.FieldValueUint("payload_length", cnt)
 
 	d.FieldStruct("extension_payload", func(d *decode.D) {
 		d.FramedFn(int64(cnt)*8, func(d *decode.D) {
@@ -269,16 +280,14 @@ func aacFillElement(d *decode.D) {
 	})
 }
 
-func aacDecode(d *decode.D, in interface{}) interface{} {
-	var objectType int
-	if afi, ok := in.(format.AACFrameIn); ok {
-		objectType = afi.ObjectType
-	}
+func aacDecode(d *decode.D) any {
+	var ai format.AAC_Frame_In
+	d.ArgAs(&ai)
 
 	// TODO: seems tricky to know length of blocks
 	// TODO: currently break when length is unknown
 
-	switch objectType {
+	switch ai.ObjectType {
 	case format.MPEGAudioObjectTypeMain,
 		format.MPEGAudioObjectTypeLC,
 		format.MPEGAudioObjectTypeSSR,
@@ -294,15 +303,15 @@ func aacDecode(d *decode.D, in interface{}) interface{} {
 				switch se {
 				case FIL:
 					aacFillElement(d)
-
-				case SCE:
-					aacSingleChannelElement(d, objectType)
+				case CPE:
+					aacChannelPairElement(d)
 					seenTerm = true
-
+				case SCE:
+					aacSingleChannelElement(d, ai.ObjectType)
+					seenTerm = true
 				case PCE:
 					aacProgramConfigElement(d, 0)
 					seenTerm = true
-
 				default:
 					fallthrough
 				case TERM:

@@ -22,7 +22,7 @@ func annexBDecodeStartCodeLen(v uint64) int64 {
 	}
 }
 
-func annexBDecode(d *decode.D, _ interface{}, format decode.Group) interface{} {
+func annexBDecode(d *decode.D, format decode.Group) any {
 	currentOffset, currentPrefixLen, err := annexBFindStartCode(d)
 	// TODO: really restrict to 0?
 	if err != nil || currentOffset != 0 {
@@ -38,7 +38,7 @@ func annexBDecode(d *decode.D, _ interface{}, format decode.Group) interface{} {
 		}
 
 		naluLen := nextOffset
-		d.FieldFormatLen("nalu", naluLen, format, nil)
+		d.FieldFormatLen("nalu", naluLen, &format, nil)
 
 		currentPrefixLen = nextPrefixLen
 	}

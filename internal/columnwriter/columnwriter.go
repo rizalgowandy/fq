@@ -3,33 +3,62 @@ package columnwriter
 import (
 	"bytes"
 	"io"
-	"strings"
-
-	"github.com/wader/fq/internal/ansi"
+	"unicode/utf8"
 )
 
-type Column struct {
-	Width int
-	Lines []string
-	Buf   bytes.Buffer
-	Wrap  bool
+type Column interface {
+	io.Writer
+	Lines() int
+	PreFlush()
+	FlushLine(w io.Writer, lines int, lastColumn bool) error
+	Reset()
 }
 
-func divideString(s string, l int) []string {
+var _ Column = (*MultiLineColumn)(nil)
+
+type MultiLineColumn struct {
+	Width   int
+	Wrap    bool
+	LenFn   func(s string) int
+	SliceFn func(s string, start, stop int) string
+
+	lines []string
+	buf   bytes.Buffer
+}
+
+func (c *MultiLineColumn) divideString(s string, l int) []string {
 	var ss []string
-	parts := len(s) / l
+	parts := c.lenFn(s) / l
 	for i := 0; i < parts; i++ {
-		ss = append(ss, s[i*l:(i+1)*l])
+		ss = append(ss, c.sliceFn(s, i*l, (i+1)*l))
 	}
 	if len(s)%l != 0 {
-		ss = append(ss, s[parts*l:])
+		ss = append(ss, c.sliceFn(s, parts*l, -1))
 	}
 
 	return ss
 }
 
-func (c *Column) Write(p []byte) (int, error) {
-	bb := &c.Buf
+// TODO: fn assume fixed width runes
+func (c *MultiLineColumn) lenFn(s string) int {
+	if c.LenFn != nil {
+		return c.LenFn(s)
+	}
+	return utf8.RuneCountInString(s)
+}
+
+func (c *MultiLineColumn) sliceFn(s string, start, stop int) string {
+	if c.LenFn != nil {
+		return c.SliceFn(s, start, stop)
+	}
+	if stop == -1 {
+		return string(([]rune(s))[start:])
+	}
+	return string(([]rune(s))[start:stop])
+}
+
+func (c *MultiLineColumn) Write(p []byte) (int, error) {
+	bb := &c.buf
 
 	bb.Write(p)
 
@@ -43,10 +72,10 @@ func (c *Column) Write(p []byte) (int, error) {
 		}
 
 		line := string([]rune(string(b[pos : pos+i])))
-		if c.Wrap && len(line) > c.Width {
-			c.Lines = append(c.Lines, divideString(line, c.Width)...)
+		if c.Wrap && c.Width != -1 && c.lenFn(line) > c.Width {
+			c.lines = append(c.lines, c.divideString(line, c.Width)...)
 		} else {
-			c.Lines = append(c.Lines, line)
+			c.lines = append(c.lines, line)
 		}
 
 		pos += i + 1
@@ -57,16 +86,75 @@ func (c *Column) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (c *Column) Flush() {
-	if c.Buf.Len() > 0 {
+func (c *MultiLineColumn) Lines() int { return len(c.lines) }
+
+func (c *MultiLineColumn) PreFlush() {
+	if c.buf.Len() > 0 {
 		_, _ = c.Write([]byte{'\n'})
 	}
 }
 
+func (c *MultiLineColumn) FlushLine(w io.Writer, lineNr int, lastColumn bool) error {
+	var s string
+	if lineNr < len(c.lines) {
+		s = c.lines[lineNr]
+		if c.Width != -1 && c.lenFn(s) > c.Width {
+			s = c.sliceFn(s, 0, c.Width)
+		}
+	}
+
+	if _, err := w.Write([]byte(s)); err != nil {
+		return err
+	}
+
+	if !lastColumn && c.Width != -1 {
+		l := c.lenFn(s)
+		if l < c.Width {
+			n := c.Width - l
+			for n > 0 {
+				const whitespace = "                                                                                "
+				r := n
+				if r > len(whitespace) {
+					r = len(whitespace)
+				}
+				n -= r
+
+				if _, err := w.Write([]byte(whitespace[0:r])); err != nil {
+					return err
+				}
+			}
+
+		}
+	}
+
+	return nil
+}
+
+func (c *MultiLineColumn) Reset() {
+	c.lines = nil
+	c.buf.Reset()
+}
+
+type BarColumn string
+
+var _ Column = (*BarColumn)(nil)
+
+func (c BarColumn) Write(p []byte) (int, error) { return len(p), nil } // TODO: can be removed?
+func (c BarColumn) Lines() int                  { return 1 }
+func (c BarColumn) PreFlush()                   {}
+func (c BarColumn) FlushLine(w io.Writer, lineNr int, lastColumn bool) error {
+	if _, err := w.Write([]byte(c)); err != nil {
+		return err
+	}
+	return nil
+}
+func (c BarColumn) Reset() {}
+
 // Writer maintins multiple column io.Writer:s. On Flush() row align them.
 type Writer struct {
-	Columns []*Column
-	w       io.Writer
+	Columns []Column
+
+	w io.Writer
 }
 
 func indexByteSet(s []byte, cs []byte) int {
@@ -82,12 +170,7 @@ func indexByteSet(s []byte, cs []byte) int {
 	return ri
 }
 
-func New(w io.Writer, widths []int) *Writer {
-	var columns []*Column
-	for _, w := range widths {
-		columns = append(columns, &Column{Width: w})
-	}
-
+func New(w io.Writer, columns ...Column) *Writer {
 	return &Writer{
 		Columns: columns,
 		w:       w,
@@ -95,33 +178,21 @@ func New(w io.Writer, widths []int) *Writer {
 }
 
 func (w *Writer) Flush() error {
-	for _, c := range w.Columns {
-		c.Flush()
-	}
-
 	maxLines := 0
 	for _, c := range w.Columns {
-		lenLines := len(c.Lines)
-		if lenLines > maxLines {
-			maxLines = len(c.Lines)
+		l := c.Lines()
+		if l > maxLines {
+			maxLines = l
 		}
 	}
 
-	for i := 0; i < maxLines; i++ {
-		for _, c := range w.Columns {
-			var s string
-			if i < len(c.Lines) {
-				s = c.Lines[i]
-			}
+	for _, c := range w.Columns {
+		c.PreFlush()
+	}
 
-			if c.Width != -1 {
-				l := ansi.Len(s)
-				if l < c.Width {
-					s += strings.Repeat(" ", c.Width-l)
-				}
-			}
-
-			if _, err := w.w.Write([]byte(s)); err != nil {
+	for line := 0; line < maxLines; line++ {
+		for ci, c := range w.Columns {
+			if err := c.FlushLine(w.w, line, ci == len(w.Columns)-1); err != nil {
 				return err
 			}
 		}
@@ -131,8 +202,7 @@ func (w *Writer) Flush() error {
 	}
 
 	for _, c := range w.Columns {
-		c.Lines = nil
-		c.Buf.Reset()
+		c.Reset()
 	}
 
 	return nil

@@ -2,7 +2,6 @@ package fqtest
 
 import (
 	"context"
-	"io/ioutil"
 	"os"
 	"strconv"
 	"testing"
@@ -10,17 +9,18 @@ import (
 	"github.com/wader/fq/internal/difftest"
 	"github.com/wader/fq/internal/script"
 	"github.com/wader/fq/pkg/interp"
-	"github.com/wader/fq/pkg/registry"
 )
 
-func TestPath(t *testing.T, registry *registry.Registry) {
+func TestPath(t *testing.T, registry *interp.Registry, update bool) {
 	difftest.TestWithOptions(t, difftest.Options{
 		Path:        ".",
 		Pattern:     "*.fqtest",
 		ColorDiff:   os.Getenv("DIFF_COLOR") != "",
-		WriteOutput: os.Getenv("WRITE_ACTUAL") != "",
+		WriteOutput: os.Getenv("WRITE_ACTUAL") != "" || update,
 		Fn: func(t *testing.T, path, input string) (string, string, error) {
-			b, err := ioutil.ReadFile(path)
+			t.Parallel()
+
+			b, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -43,7 +43,7 @@ func TestPath(t *testing.T, registry *registry.Registry) {
 
 					err = i.Main(context.Background(), cr.Stdout(), "testversion")
 					if err != nil {
-						if ex, ok := err.(interp.Exiter); ok { //nolint:errorlint
+						if ex, ok := err.(interp.Exiter); ok {
 							cr.ActualExitCode = ex.ExitCode()
 						}
 					}

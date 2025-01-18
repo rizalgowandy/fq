@@ -5,30 +5,27 @@ package inet
 
 import (
 	"github.com/wader/fq/format"
-	"github.com/wader/fq/format/registry"
 	"github.com/wader/fq/pkg/decode"
+	"github.com/wader/fq/pkg/interp"
 	"github.com/wader/fq/pkg/scalar"
 )
 
-var sllPacketEther8023Format decode.Group
+var sllPacketInetPacketGroup decode.Group
 
 func init() {
-	registry.MustRegister(decode.Format{
-		Name:        format.SLL_PACKET,
-		Description: "Linux cooked capture encapsulation",
-		Groups:      []string{format.LINK_FRAME},
-		Dependencies: []decode.Dependency{
-			{Names: []string{format.ETHER8023_FRAME}, Group: &sllPacketEther8023Format},
-		},
-		DecodeFn: decodeSLL,
-	})
+	interp.RegisterFormat(
+		format.SLL_Packet,
+		&decode.Format{
+			Description: "Linux cooked capture encapsulation",
+			Groups:      []*decode.Group{format.Link_Frame},
+			Dependencies: []decode.Dependency{
+				{Groups: []*decode.Group{format.INET_Packet}, Out: &sllPacketInetPacketGroup},
+			},
+			DecodeFn: decodeSLL,
+		})
 }
 
-var sllPacketFrameTypeFormat = map[uint64]*decode.Group{
-	format.EtherTypeIPv4: &ether8023FrameIPv4Format,
-}
-
-var sllPacketTypeMap = scalar.UToScalar{
+var sllPacketTypeMap = scalar.UintMap{
 	0: {Sym: "to_us", Description: "Sent to us"},
 	1: {Sym: "broadcast", Description: "Broadcast by somebody else"},
 	2: {Sym: "multicast", Description: "Multicast by somebody else"},
@@ -42,7 +39,7 @@ const (
 )
 
 // based on https://github.com/torvalds/linux/blob/master/include/uapi/linux/if_arp.h
-var arpHdrTypeMAp = scalar.UToScalar{
+var arpHdrTypeMAp = scalar.UintMap{
 	0:                  {Sym: "netrom", Description: `from KA9Q: NET/ROM pseudo`},
 	arpHdrTypeEther:    {Sym: "ether", Description: `Ethernet 10Mbps`},
 	2:                  {Sym: "eether", Description: `Experimental Ethernet`},
@@ -112,11 +109,10 @@ var arpHdrTypeMAp = scalar.UToScalar{
 	0xfffe:             {Sym: "none", Description: `zero header length`},
 }
 
-func decodeSLL(d *decode.D, in interface{}) interface{} {
-	if lsi, ok := in.(format.LinkFrameIn); ok {
-		if lsi.Type != format.LinkTypeLINUX_SLL {
-			d.Fatalf("wrong link type")
-		}
+func decodeSLL(d *decode.D) any {
+	var lfi format.Link_Frame_In
+	if d.ArgAs(&lfi) && lfi.Type != format.LinkTypeLINUX_SLL {
+		d.Fatalf("wrong link type %d", lfi.Type)
 	}
 
 	d.FieldU16("packet_type", sllPacketTypeMap)
@@ -131,16 +127,17 @@ func decodeSLL(d *decode.D, in interface{}) interface{} {
 	// TODO: handle other arphdr types
 	switch arpHdrType {
 	case arpHdrTypeLoopback, arpHdrTypeEther:
-		_ = d.FieldMustGet("link_address").TryScalarFn(mapUToEtherSym, scalar.Hex)
-		protcolType := d.FieldU16("protocol_type", format.EtherTypeMap, scalar.Hex)
-		if g, ok := sllPacketFrameTypeFormat[protcolType]; ok {
-			d.FieldFormatLen("data", d.BitsLeft(), *g, nil)
-		} else {
-			d.FieldRawLen("data", d.BitsLeft())
-		}
+		_ = d.FieldMustGet("link_address").TryUintScalarFn(mapUToEtherSym, scalar.UintHex)
+		protcolType := d.FieldU16("protocol_type", format.EtherTypeMap, scalar.UintHex)
+		d.FieldFormatOrRawLen(
+			"payload",
+			d.BitsLeft(),
+			&sllPacketInetPacketGroup,
+			format.INET_Packet_In{EtherType: int(protcolType)},
+		)
 	default:
 		d.FieldU16LE("protocol_type")
-		d.FieldRawLen("data", d.BitsLeft())
+		d.FieldRawLen("payload", d.BitsLeft())
 	}
 
 	return nil

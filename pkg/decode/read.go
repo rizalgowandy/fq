@@ -2,11 +2,12 @@ package decode
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"math"
 	"math/big"
 
-	"github.com/wader/fq/internal/mathextra"
+	"github.com/wader/fq/internal/mathx"
 	"github.com/wader/fq/pkg/bitio"
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/unicode"
@@ -20,7 +21,7 @@ func (d *D) tryUEndian(nBits int, endian Endian) (uint64, error) {
 	if nBits < 0 {
 		return 0, fmt.Errorf("tryUEndian nBits must be >= 0 (%d)", nBits)
 	}
-	n, err := d.bits(nBits)
+	n, err := d.TryUintBits(nBits)
 	if err != nil {
 		return 0, err
 	}
@@ -32,8 +33,8 @@ func (d *D) tryUEndian(nBits int, endian Endian) (uint64, error) {
 }
 
 func (d *D) trySEndian(nBits int, endian Endian) (int64, error) {
-	if nBits < 0 {
-		return 0, fmt.Errorf("trySEndian nBits must be >= 0 (%d)", nBits)
+	if nBits < 1 {
+		return 0, fmt.Errorf("trySEndian nBits must be >= 1 (%d)", nBits)
 	}
 	n, err := d.tryUEndian(nBits, endian)
 	if err != nil {
@@ -51,7 +52,7 @@ func (d *D) trySEndian(nBits int, endian Endian) (int64, error) {
 }
 
 // from https://github.com/golang/go/wiki/SliceTricks#reversing
-func reverseBytes(a []byte) {
+func ReverseBytes(a []byte) {
 	for i := len(a)/2 - 1; i >= 0; i-- {
 		opp := len(a) - 1 - i
 		a[i], a[opp] = a[opp], a[i]
@@ -70,12 +71,12 @@ func (d *D) tryBigIntEndianSign(nBits int, endian Endian, sign bool) (*big.Int, 
 	}
 
 	if endian == LittleEndian {
-		reverseBytes(buf)
+		ReverseBytes(buf)
 	}
 
 	n := new(big.Int)
 	if sign {
-		mathextra.BigIntSetBytesSigned(n, buf)
+		mathx.BigIntSetBytesSigned(n, buf)
 	} else {
 		n.SetBytes(buf)
 	}
@@ -88,20 +89,22 @@ func (d *D) tryFEndian(nBits int, endian Endian) (float64, error) {
 	if nBits < 0 {
 		return 0, fmt.Errorf("tryFEndian nBits must be >= 0 (%d)", nBits)
 	}
-	n, err := d.bits(nBits)
+	b, err := d.TryBits(nBits)
 	if err != nil {
 		return 0, err
 	}
 	if endian == LittleEndian {
-		n = bitio.ReverseBytes64(nBits, n)
+		ReverseBytes(b)
 	}
 	switch nBits {
 	case 16:
-		return float64(mathextra.Float16(uint16(n)).Float32()), nil
+		return float64(mathx.Float16(binary.BigEndian.Uint16(b)).Float32()), nil
 	case 32:
-		return float64(math.Float32frombits(uint32(n))), nil
+		return float64(math.Float32frombits(binary.BigEndian.Uint32(b))), nil
 	case 64:
-		return math.Float64frombits(n), nil
+		return math.Float64frombits(binary.BigEndian.Uint64(b)), nil
+	case 80:
+		return mathx.NewFloat80FromBytes(b).Float64(), nil
 	default:
 		return 0, fmt.Errorf("unsupported float size %d", nBits)
 	}
@@ -111,7 +114,7 @@ func (d *D) tryFPEndian(nBits int, fBits int, endian Endian) (float64, error) {
 	if nBits < 0 {
 		return 0, fmt.Errorf("tryFPEndian nBits must be >= 0 (%d)", nBits)
 	}
-	n, err := d.bits(nBits)
+	n, err := d.TryUintBits(nBits)
 	if err != nil {
 		return 0, err
 	}
@@ -143,15 +146,13 @@ func (d *D) tryText(nBytes int, e encoding.Encoding) (string, error) {
 }
 
 // read length prefixed text (ex pascal short string)
-// lBits length prefix
+// lenBytes length prefix
 // fixedBytes if != -1 read nBytes but trim to length
+//
 //nolint:unparam
-func (d *D) tryTextLenPrefixed(lenBits int, fixedBytes int, e encoding.Encoding) (string, error) {
-	if lenBits < 0 {
-		return "", fmt.Errorf("tryTextLenPrefixed lenBits must be >= 0 (%d)", lenBits)
-	}
-	if fixedBytes < 0 {
-		return "", fmt.Errorf("tryTextLenPrefixed fixedBytes must be >= 0 (%d)", fixedBytes)
+func (d *D) tryTextLenPrefixed(prefixLenBytes int, fixedBytes int, e encoding.Encoding) (string, error) {
+	if prefixLenBytes < 0 {
+		return "", fmt.Errorf("tryTextLenPrefixed lenBytes must be >= 0 (%d)", prefixLenBytes)
 	}
 	bytesLeft := d.BitsLeft() / 8
 	if int64(fixedBytes) > bytesLeft {
@@ -159,46 +160,44 @@ func (d *D) tryTextLenPrefixed(lenBits int, fixedBytes int, e encoding.Encoding)
 	}
 
 	p := d.Pos()
-	l, err := d.bits(lenBits)
+	lenBytes, err := d.TryUintBits(prefixLenBytes * 8)
 	if err != nil {
 		return "", err
 	}
 
-	n := int(l)
+	readBytes := int(lenBytes)
 	if fixedBytes != -1 {
-		n = fixedBytes - 1
 		// TODO: error?
-		if l > uint64(n) {
-			l = uint64(n)
-		}
+		readBytes = fixedBytes - prefixLenBytes
+		lenBytes = min(lenBytes, uint64(readBytes))
 	}
 
-	bs, err := d.TryBytesLen(n)
+	bs, err := d.TryBytesLen(readBytes)
 	if err != nil {
 		d.SeekAbs(p)
 		return "", err
 	}
-	return e.NewDecoder().String(string(bs[0:l]))
+	return e.NewDecoder().String(string(bs[0:lenBytes]))
 }
 
-func (d *D) tryTextNull(nullBytes int, e encoding.Encoding) (string, error) {
-	if nullBytes < 1 {
-		return "", fmt.Errorf("tryTextNull nullBytes must be >= 1 (%d)", nullBytes)
+func (d *D) tryTextNull(charBytes int, e encoding.Encoding) (string, error) {
+	if charBytes < 1 {
+		return "", fmt.Errorf("tryTextNull charBytes must be >= 1 (%d)", charBytes)
 	}
 
 	p := d.Pos()
-	peekBits, _, err := d.TryPeekFind(nullBytes*8, 8, -1, func(v uint64) bool { return v == 0 })
+	peekBits, _, err := d.TryPeekFind(charBytes*8, int64(charBytes)*8, -1, func(v uint64) bool { return v == 0 })
 	if err != nil {
 		return "", err
 	}
-	n := (int(peekBits) / 8) + nullBytes
+	n := (int(peekBits) / 8) + charBytes
 	bs, err := d.TryBytesLen(n)
 	if err != nil {
 		d.SeekAbs(p)
 		return "", err
 	}
 
-	return e.NewDecoder().String(string(bs[0 : n-nullBytes]))
+	return e.NewDecoder().String(string(bs[0 : n-charBytes]))
 }
 
 func (d *D) tryTextNullLen(fixedBytes int, e encoding.Encoding) (string, error) {
@@ -227,7 +226,7 @@ func (d *D) tryUnary(ov uint64) (uint64, error) {
 	p := d.Pos()
 	var n uint64
 	for {
-		b, err := d.bits(1)
+		b, err := d.TryUintBits(1)
 		if err != nil {
 			d.SeekAbs(p)
 			return 0, err
@@ -241,9 +240,68 @@ func (d *D) tryUnary(ov uint64) (uint64, error) {
 }
 
 func (d *D) tryBool() (bool, error) {
-	n, err := d.bits(1)
+	n, err := d.TryUintBits(1)
 	if err != nil {
 		return false, err
 	}
 	return n == 1, nil
+}
+
+// Unsigned LEB128, also known as "Base 128 Varint".
+//
+// Description from wasm spec:
+//
+//	uN ::= n:byte          => n                     (if n < 2^7 && n < 2^N)
+//	       n:byte m:u(N-7) => 2^7 * m + (n - 2^7)   (if n >= 2^7 && N > 7)
+//
+// Varint description:
+// https://protobuf.dev/programming-guides/encoding/#varints
+func (d *D) tryULEB128() (uint64, error) {
+	var result uint64
+	var shift uint
+
+	for {
+		b := d.U8()
+		if shift >= 63 && b != 0 {
+			return 0, fmt.Errorf("overflow when reading unsigned leb128, shift %d >= 63", shift)
+		}
+		result |= (b & 0b01111111) << shift
+		if b&0b10000000 == 0 {
+			break
+		}
+		shift += 7
+	}
+	return result, nil
+}
+
+// Signed LEB128, description from wasm spec
+//
+//	sN ::= n:byte          => n                     (if n < 2^6 && n < 2^(N-1))
+//	       n:byte          => n - 2^7               (if 2^6 <= n < 2^7 && n >= 2^7 - 2^(N-1))
+//	       n:byte m:s(N-7) => 2^7 * m + (n - 2^7)   (if n >= 2^7 && N > 7)
+func (d *D) trySLEB128() (int64, error) {
+	const n = 64
+	var result int64
+	var shift uint
+	var b byte
+
+	for {
+		b = byte(d.U8())
+		if shift == 63 && b != 0 && b != 0x7f {
+			return 0, fmt.Errorf("overflow when reading signed leb128, shift %d >= 63", shift)
+		}
+
+		result |= int64(b&0x7f) << shift
+		shift += 7
+
+		if b&0x80 == 0 {
+			break
+		}
+	}
+
+	if shift < n && (b&0x40) == 0x40 {
+		result |= -1 << shift
+	}
+
+	return result, nil
 }

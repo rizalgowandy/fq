@@ -5,27 +5,33 @@ package flowsdecoder
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"net"
 
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/ip4defrag"
-	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/reassembly"
+	"github.com/gopacket/gopacket"
+	"github.com/gopacket/gopacket/ip4defrag"
+	"github.com/gopacket/gopacket/layers"
+	"github.com/gopacket/gopacket/reassembly"
 )
 
-type IPEndpoint struct {
+type TCPEndpoint struct {
 	IP   net.IP
 	Port int
 }
 
-type TCPConnection struct {
-	ClientEndpoint IPEndpoint
-	ServerEndpoint IPEndpoint
-	ClientToServer *bytes.Buffer
-	ServerToClient *bytes.Buffer
+type TCPDirection struct {
+	Endpoint     TCPEndpoint
+	HasStart     bool
+	HasEnd       bool
+	Buffer       *bytes.Buffer
+	SkippedBytes uint64
+}
 
+type TCPConnection struct {
+	Client     *TCPDirection
+	Server     *TCPDirection
 	tcpState   *reassembly.TCPSimpleFSM
-	optChecker reassembly.TCPOptionCheck
+	optChecker *reassembly.TCPOptionCheck
 	net        gopacket.Flow
 	transport  gopacket.Flow
 }
@@ -36,10 +42,12 @@ func (t *TCPConnection) Accept(tcp *layers.TCP, ci gopacket.CaptureInfo, dir rea
 		// TODO: handle err?
 		return false
 	}
-	// has ok options?
-	if err := t.optChecker.Accept(tcp, ci, dir, nextSeq, start); err != nil {
-		// TODO: handle err?
-		return false
+	if t.optChecker != nil {
+		// has ok options?
+		if err := t.optChecker.Accept(tcp, ci, dir, nextSeq, start); err != nil {
+			// TODO: handle err?
+			return false
+		}
 	}
 	// TODO: checksum?
 
@@ -48,25 +56,34 @@ func (t *TCPConnection) Accept(tcp *layers.TCP, ci gopacket.CaptureInfo, dir rea
 }
 
 func (t *TCPConnection) ReassembledSG(sg reassembly.ScatterGather, ac reassembly.AssemblerContext) {
-	dir, _, _, skip := sg.Info()
+	dir, start, end, skip := sg.Info()
 	length, _ := sg.Lengths()
+
+	var d *TCPDirection
+	switch dir {
+	case reassembly.TCPDirClientToServer:
+		d = t.Client
+	case reassembly.TCPDirServerToClient:
+		d = t.Server
+	default:
+		panic("unreachable")
+	}
 
 	if skip == -1 {
 		// can't find where skip == -1 is documented but this is what gopacket reassemblydump does
 		// to allow missing syn/ack
 	} else if skip != 0 {
 		// stream has missing bytes
+		d.SkippedBytes += uint64(skip)
 		return
 	}
 
+	d.HasStart = d.HasStart || start
+	d.HasEnd = d.HasEnd || end
+
 	data := sg.Fetch(length)
 
-	switch dir {
-	case reassembly.TCPDirClientToServer:
-		t.ClientToServer.Write(data)
-	case reassembly.TCPDirServerToClient:
-		t.ServerToClient.Write(data)
-	}
+	d.Buffer.Write(data)
 }
 
 func (t *TCPConnection) ReassemblyComplete(ac reassembly.AssemblerContext) bool {
@@ -98,21 +115,29 @@ func (fd *Decoder) New(net, transport gopacket.Flow, tcp *layers.TCP, ac reassem
 	}
 
 	stream := &TCPConnection{
-		ClientEndpoint: IPEndpoint{
-			IP:   append([]byte(nil), net.Src().Raw()...),
-			Port: clientPort,
+		Client: &TCPDirection{
+			Endpoint: TCPEndpoint{
+				IP:   append([]byte(nil), net.Src().Raw()...),
+				Port: clientPort,
+			},
+			Buffer: &bytes.Buffer{},
 		},
-		ServerEndpoint: IPEndpoint{
-			IP:   append([]byte(nil), net.Dst().Raw()...),
-			Port: serverPort,
+		Server: &TCPDirection{
+			Endpoint: TCPEndpoint{
+				IP:   append([]byte(nil), net.Dst().Raw()...),
+				Port: serverPort,
+			},
+			Buffer: &bytes.Buffer{},
 		},
-		ClientToServer: &bytes.Buffer{},
-		ServerToClient: &bytes.Buffer{},
 
-		net:        net,
-		transport:  transport,
-		tcpState:   reassembly.NewTCPSimpleFSM(fsmOptions),
-		optChecker: reassembly.NewTCPOptionCheck(),
+		net:       net,
+		transport: transport,
+		tcpState:  reassembly.NewTCPSimpleFSM(fsmOptions),
+	}
+
+	if fd.Options.CheckTCPOptions {
+		c := reassembly.NewTCPOptionCheck()
+		stream.optChecker = &c
 	}
 
 	fd.TCPConnections = append(fd.TCPConnections, stream)
@@ -121,6 +146,8 @@ func (fd *Decoder) New(net, transport gopacket.Flow, tcp *layers.TCP, ac reassem
 }
 
 type Decoder struct {
+	Options DecoderOptions
+
 	TCPConnections  []*TCPConnection
 	IPV4Reassembled []IPV4Reassembled
 
@@ -128,8 +155,14 @@ type Decoder struct {
 	tcpAssembler *reassembly.Assembler
 }
 
-func New() *Decoder {
-	flowDecoder := &Decoder{}
+type DecoderOptions struct {
+	CheckTCPOptions bool
+}
+
+func New(options DecoderOptions) *Decoder {
+	flowDecoder := &Decoder{
+		Options: options,
+	}
 	streamPool := reassembly.NewStreamPool(flowDecoder)
 	tcpAssembler := reassembly.NewAssembler(streamPool)
 	flowDecoder.tcpAssembler = tcpAssembler
@@ -138,16 +171,40 @@ func New() *Decoder {
 	return flowDecoder
 }
 
-func (fd *Decoder) SLLPacket(bs []byte) error {
-	return fd.packet(gopacket.NewPacket(bs, layers.LayerTypeLinuxSLL, gopacket.Lazy))
-}
-
 func (fd *Decoder) EthernetFrame(bs []byte) error {
 	return fd.packet(gopacket.NewPacket(bs, layers.LayerTypeEthernet, gopacket.Lazy))
 }
 
+func (fd *Decoder) IPv4Packet(bs []byte) error {
+	return fd.packet(gopacket.NewPacket(bs, layers.LayerTypeIPv4, gopacket.Lazy))
+}
+
+func (fd *Decoder) IPv6Packet(bs []byte) error {
+	return fd.packet(gopacket.NewPacket(bs, layers.LayerTypeIPv6, gopacket.Lazy))
+}
+
+func (fd *Decoder) SLLPacket(bs []byte) error {
+	return fd.packet(gopacket.NewPacket(bs, layers.LayerTypeLinuxSLL, gopacket.Lazy))
+}
+
+func (fd *Decoder) SLL2Packet(bs []byte) error {
+	return fd.packet(gopacket.NewPacket(bs, layers.LayerTypeLinuxSLL2, gopacket.Lazy))
+}
+
 func (fd *Decoder) LoopbackFrame(bs []byte) error {
 	return fd.packet(gopacket.NewPacket(bs, layers.LayerTypeLoopback, gopacket.Lazy))
+}
+
+// LinkTypeRAW IPv4 or Ipv6
+func (fd *Decoder) RAWIPFrame(bs []byte) error {
+	version := bs[0] >> 4
+	switch version {
+	case 4:
+		return fd.IPv4Packet(bs)
+	case 6:
+		return fd.IPv6Packet(bs)
+	}
+	return fmt.Errorf("invalid ip version %v", version)
 }
 
 func (fd *Decoder) packet(p gopacket.Packet) error {
@@ -179,6 +236,9 @@ func (fd *Decoder) packet(p gopacket.Packet) error {
 					Datagram:      sb.Bytes(),
 				})
 
+				// i think this replaces p with the newly defragmented ip packet and is
+				// used below when reassembling tcp streams
+				// see gopacket reassemblydump example
 				pb, ok := p.(gopacket.PacketBuilder)
 				if !ok {
 					panic("not a PacketBuilder")

@@ -1,32 +1,28 @@
-Supports decoding BER, CER and DER ([X.690]([X.690_1297.pdf)).
+Supports decoding BER, CER and DER (X.690).
 
 - Currently no extra validation is done for CER and DER.
 - Does not support specifying a schema.
 - Supports `torepr` but without schema all sequences and sets will be arrays.
 
-```
-fq -d asn1_ber torepr file.ber
+### Can be used to decode certificates etc
+
+```sh
+$ fq -d bytes 'from_pem | asn1_ber | d' cert.pem
 ```
 
-Functions `frompem` and `topem` can help working with PEM format:
+### Can decode nested values
 
-```
-fq -d raw 'frompem | asn1_ber | d' cert.pem
-```
-
-If the schema is known and not that complicated it can be reproduced:
-
-```
-fq -d asn1_ber 'torepr as $r | ["version", "modulus", "private_exponent", "private_exponen", "prime1", "prime2", "exponent1", "exponent2", "coefficient"] | with_entries({key: .value, value: $r[.key]})' pkcs1.der
+```sh
+$ fq -d asn1_ber '.constructed[1].value | asn1_ber' file.ber
 ```
 
-Can be used to decode nested parts:
+### Manual schema
 
-```
-fq -d asn1_ber '.constructed[1].value | asn1_ber' file.ber
+```sh
+$ fq -d asn1_ber 'torepr as $r | ["version", "modulus", "private_exponent", "private_exponen", "prime1", "prime2", "exponent1", "exponent2", "coefficient"] | with_entries({key: .value, value: $r[.key]})' pkcs1.der
 ```
 
-References and tools:
+### References
 - https://www.itu.int/ITU-T/studygroups/com10/languages/X.690_1297.pdf
 - https://en.wikipedia.org/wiki/X.690
 - https://letsencrypt.org/docs/a-warm-welcome-to-asn1-and-der/

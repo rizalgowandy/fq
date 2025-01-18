@@ -1,70 +1,16 @@
 include "internal";
 include "options";
 include "binary";
-include "ansi";
-
-def _display_default_opts:
-  options({depth: 1});
-
-def display($opts):
-  ( options($opts) as $opts
-  | if _can_display then _display($opts)
-    else
-      ( if type == "string" and $opts.raw_string then print
-        else _print_color_json($opts)
-        end
-      , ( $opts.join_string
-        | if . then print else empty end
-        )
-      )
-    end
-  | error("unreachable")
-  );
-def display: display({});
-
-
-def hexdump($opts): _hexdump(options({display_bytes: 0} + $opts));
-def hexdump: hexdump({display_bytes: 0});
-def hd($opts): hexdump($opts);
-def hd: hexdump;
+include "decode";
 
 def intdiv(a; b): _intdiv(a; b);
 
-# TODO: escape for safe key names
-# path ["a", 1, "b"] -> "a[1].b"
-def path_to_expr($opts):
-  ( if length == 0 or (.[0] | type) != "string" then
-      [""] + .
-    end
-  | map(
-      if type == "number" then
-        ( ("[" | _ansi_if($opts; "array"))
-        , _ansi_if($opts; "number")
-        , ("]" | _ansi_if($opts; "array"))
-        )      else
-        ( "."
-        , # empty (special case for leading index or empty path) or key
-          if . == "" or _is_ident then _ansi_if($opts; "objectkey")
-          else
-            "\"\(_escape_ident)\"" | _ansi_if($opts; "string")
-          end
-        )
-      end
-    )
-  | join("")
-  );
-def path_to_expr: path_to_expr(null);
-
-# TODO: don't use eval? should support '.a.b[1]."c.c"' and escapes?
-def expr_to_path:
-  ( if type != "string" then error("require string argument") end
-  | _eval("null | path(\(.))")
-  );
-
-def trim: capture("^\\s*(?<str>.*?)\\s*$"; "").str;
-
 # does +1 and [:1] as " "*0 is null
 def rpad($s; $w): . + ($s * ($w+1-length))[1:];
+
+# add missing group/0 function
+# https://github.com/stedolan/jq/issues/2444
+def group: group_by(.);
 
 # like group but groups streaks based on condition
 def streaks_by(f):
@@ -133,58 +79,6 @@ def chunk($size):
     ]
   end;
 
-# helper to build path query/generate functions for tree structures with
-# non-unique children, ex: mp4_path
-def tree_path(children; name; $v):
-  def _lookup:
-    # add implicit zeros to get first value
-    # ["a", "b", 1] => ["a", 0, "b", 1]
-    def _normalize_path:
-      ( . as $np
-      | if $np | last | type == "string" then $np+[0] end
-      # state is [path acc, possible pending zero index]
-      | ( reduce .[] as $np ([[], []];
-          if $np | type == "string" then
-            [(.[0]+.[1]+[$np]), [0]]
-          else
-            [.[0]+[$np], []]
-          end
-        ))
-      )[0];
-    ( . as $c
-    | $v
-    | expr_to_path
-    | _normalize_path
-    | reduce .[] as $n ($c;
-        if $n | type == "string" then
-          children | map(select(name == $n))
-        else
-          .[$n]
-        end
-      )
-    );
-  def _path:
-    [ . as $r
-    | $v._path as $p
-    | foreach range(($p | length)/2) as $i (null; null;
-        ( ($r | getpath($p[0:($i+1)*2]) | name) as $name
-        | [($r | getpath($p[0:($i+1)*2-1]))[] | name][0:$p[($i*2)+1]+1] as $before
-        | [ $name
-          , ($before | map(select(. == $name)) | length)-1
-          ]
-        )
-      )
-    | [ ".", .[0],
-      (.[1] | if . == 0 then empty else "[", ., "]" end)
-      ]
-    ]
-    | flatten
-    | join("");
-  if $v | type == "string" then _lookup
-  else _path
-  end;
-
-
 # [{a: 123, ...}, ...]
 # colmap maps something into [col, ...]
 # render maps [{column: 0, string: "coltext", maxwidth: 12}, ..] into a row
@@ -209,60 +103,14 @@ def table(colmap; render):
     )
   end;
 
-def fromradix($base; $table):
-  ( if type != "string" then error("cannot fromradix convert: \(.)") end
-  | split("")
-  | reverse
-  | map($table[.])
-  | if . == null then error("invalid char \(.)") end
-  # state: [power, ans]
-  | reduce .[] as $c ([1,0];
-      ( (.[0] * $base) as $b
-      | [$b, .[1] + (.[0] * $c)]
-      )
-    )
-  | .[1]
-  );
-def fromradix($base):
-  fromradix($base; {
-    "0": 0, "1": 1, "2": 2, "3": 3,"4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9,
-    "a": 10, "b": 11, "c": 12, "d": 13, "e": 14, "f": 15, "g": 16,
-    "h": 17, "i": 18, "j": 19, "k": 20, "l": 21, "m": 22, "n": 23,
-    "o": 24, "p": 25, "q": 26, "r": 27, "s": 28, "t": 29, "u": 30,
-    "v": 31, "w": 32, "x": 33, "y": 34, "z": 35,
-    "A": 36, "B": 37, "C": 38, "D": 39, "E": 40, "F": 41, "G": 42,
-    "H": 43, "I": 44, "J": 45, "K": 46, "L": 47, "M": 48, "N": 49,
-    "O": 50, "P": 51, "Q": 52, "R": 53, "S": 54, "T": 55, "U": 56,
-    "V": 57, "W": 58, "X": 59, "Y": 60, "Z": 61,
-    "@": 62, "_": 63,
-  });
-
-def toradix($base; $table):
-  ( if type != "number" then error("cannot toradix convert: \(.)") end
-  | if . == 0 then "0"
-    else
-      ( [ recurse(if . > 0 then intdiv(.; $base) else empty end) | . % $base]
-      | reverse
-      | .[1:]
-      | if $base <= ($table | length) then
-          map($table[.]) | join("")
-        else
-          error("base too large")
-        end
-      )
-    end
-  );
-def toradix($base):
-  toradix($base; "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ@_");
-
 # TODO: rename keys and add more, ascii/utf8/utf16/codepoint name?, le/be, signed/unsigned?
+# TODO: move?
 def iprint:
-  {
-    bin: "0b\(toradix(2))",
-    oct: "0o\(toradix(8))",
-    dec: "\(.)",
-    hex: "0x\(toradix(16))",
-    str: (try ([.] | implode) catch null),
+  { bin: "0b\(to_radix(2))"
+  , oct: "0o\(to_radix(8))"
+  , dec: "\(.)"
+  , hex: "0x\(to_radix(16))"
+  , str: (try ([.] | implode) catch null)
   };
 
 # produce a/b pairs for diffing values
@@ -291,28 +139,6 @@ def diff($a; $b):
     end
   );
 
-# https://en.wikipedia.org/wiki/Privacy-Enhanced_Mail
-# TODO: add test
-def frompem:
-  ( tobytes
-  | tostring
-  | capture("-----BEGIN(.*?)-----(?<s>.*?)-----END(.*?)-----"; "mg").s
-  | base64
-  ) // error("no pem header or footer found");
-
-def topem($label):
-  ( tobytes
-  | base64
-  | ($label | if $label != "" then " " + $label end) as $label
-  | [ "-----BEGIN\($label)-----"
-    , .
-    , "-----END\($label)-----"
-    , ""
-    ]
-  | join("\n")
-  );
-def topem: topem("");
-
 def paste:
   if _is_completing | not then
     ( [ _repeat_break(
@@ -323,3 +149,12 @@ def paste:
     | join("")
     )
   end;
+
+def expr_to_path: _expr_to_path;
+def path_to_expr: _path_to_expr;
+
+def torepr:
+  ( format as $f
+  | if $f == null then error("value is not a format root") end
+  | _format_func($f; "torepr")
+  );

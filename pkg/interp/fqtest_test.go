@@ -1,13 +1,16 @@
 package interp_test
 
 import (
+	"flag"
 	"testing"
 
 	_ "github.com/wader/fq/format/all"
-	"github.com/wader/fq/format/registry"
 	"github.com/wader/fq/pkg/fqtest"
+	"github.com/wader/fq/pkg/interp"
 )
 
-func TestFQTests(t *testing.T) {
-	fqtest.TestPath(t, registry.Default)
+var update = flag.Bool("update", false, "Update tests")
+
+func TestInterp(t *testing.T) {
+	fqtest.TestPath(t, interp.DefaultRegistry, *update)
 }

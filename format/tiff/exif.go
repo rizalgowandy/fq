@@ -5,17 +5,18 @@ package tiff
 
 import (
 	"github.com/wader/fq/format"
-	"github.com/wader/fq/format/registry"
 	"github.com/wader/fq/pkg/decode"
+	"github.com/wader/fq/pkg/interp"
 )
 
 // currently just a alias for tiff
 
 func init() {
-	registry.MustRegister(decode.Format{
-		Name:        format.EXIF,
-		Description: "Exchangeable Image File Format",
-		Groups:      []string{},
-		DecodeFn:    tiffDecode,
-	})
+	interp.RegisterFormat(
+		format.Exif,
+		&decode.Format{
+			Description: "Exchangeable Image File Format",
+			Groups:      []*decode.Group{},
+			DecodeFn:    tiffDecode,
+		})
 }

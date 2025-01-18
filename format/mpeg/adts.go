@@ -2,30 +2,31 @@ package mpeg
 
 import (
 	"github.com/wader/fq/format"
-	"github.com/wader/fq/format/registry"
 	"github.com/wader/fq/pkg/decode"
+	"github.com/wader/fq/pkg/interp"
 )
 
-var adtsFrame decode.Group
+var adtsFrameGroup decode.Group
 
 func init() {
-	registry.MustRegister(decode.Format{
-		Name:        format.ADTS,
-		Description: "Audio Data Transport Stream",
-		Groups:      []string{format.PROBE},
-		DecodeFn:    adtsDecoder,
-		RootArray:   true,
-		RootName:    "frames",
-		Dependencies: []decode.Dependency{
-			{Names: []string{format.ADTS_FRAME}, Group: &adtsFrame},
-		},
-	})
+	interp.RegisterFormat(
+		format.ADTS,
+		&decode.Format{
+			Description: "Audio Data Transport Stream",
+			Groups:      []*decode.Group{format.Probe},
+			DecodeFn:    adtsDecoder,
+			RootArray:   true,
+			RootName:    "frames",
+			Dependencies: []decode.Dependency{
+				{Groups: []*decode.Group{format.ADTS_Frame}, Out: &adtsFrameGroup},
+			},
+		})
 }
 
-func adtsDecoder(d *decode.D, in interface{}) interface{} {
+func adtsDecoder(d *decode.D) any {
 	validFrames := 0
 	for !d.End() {
-		if dv, _, _ := d.TryFieldFormat("frame", adtsFrame, nil); dv == nil {
+		if dv, _, _ := d.TryFieldFormat("frame", &adtsFrameGroup, nil); dv == nil {
 			break
 		}
 		validFrames++

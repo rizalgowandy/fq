@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/wader/fq/internal/mathextra"
+	"github.com/wader/fq/internal/mathx"
 	"github.com/wader/fq/internal/recoverfn"
 )
 
@@ -14,7 +14,7 @@ type RecoverableErrorer interface {
 
 type FormatError struct {
 	Err        error
-	Format     Format
+	Format     *Format
 	Stacktrace recoverfn.Raw
 }
 
@@ -39,13 +39,13 @@ func (fe FormatError) Error() string {
 	return fe.Err.Error()
 }
 
-func (fe FormatError) Value() interface{} {
-	var st []interface{}
+func (fe FormatError) Value() any {
+	var st []any
 	for _, f := range fe.Stacktrace.Frames() {
 		st = append(st, f.Function)
 	}
 
-	return map[string]interface{}{
+	return map[string]any{
 		"format":     fe.Format.Name,
 		"error":      fe.Err.Error(),
 		"stacktrace": st,
@@ -72,7 +72,7 @@ func (e IOError) Error() string {
 	}
 
 	return fmt.Sprintf("%s: failed at position %s (read size %s seek pos %s): %s",
-		prefix, mathextra.Bits(e.Pos).StringByteBits(10), mathextra.Bits(e.ReadSize).StringByteBits(10), mathextra.Bits(e.SeekPos).StringByteBits(10), e.Err)
+		prefix, mathx.Bits(e.Pos).StringByteBits(10), mathx.Bits(e.ReadSize).StringByteBits(10), mathx.Bits(e.SeekPos).StringByteBits(10), e.Err)
 }
 func (e IOError) Unwrap() error { return e.Err }
 
@@ -84,7 +84,7 @@ type DecoderError struct {
 }
 
 func (e DecoderError) Error() string {
-	return fmt.Sprintf("error at position %s: %s", mathextra.Bits(e.Pos).StringByteBits(16), e.Reason)
+	return fmt.Sprintf("error at position %s: %s", mathx.Bits(e.Pos).StringByteBits(16), e.Reason)
 }
 
 func (DecoderError) IsRecoverableError() bool { return true }

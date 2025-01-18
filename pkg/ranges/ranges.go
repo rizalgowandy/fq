@@ -1,25 +1,12 @@
 package ranges
 
 import (
+	"cmp"
 	"fmt"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 )
-
-func max(a, b int64) int64 {
-	if a < b {
-		return b
-	}
-	return a
-}
-
-func min(a, b int64) int64 {
-	if a > b {
-		return b
-	}
-	return a
-}
 
 type Range struct {
 	Start int64
@@ -62,9 +49,7 @@ func Gaps(total Range, ranges []Range) []Range {
 		return []Range{total}
 	}
 
-	sort.Slice(ranges, func(i, j int) bool {
-		return ranges[i].Start < ranges[j].Start
-	})
+	slices.SortFunc(ranges, func(a, b Range) int { return cmp.Compare(a.Start, b.Start) })
 
 	// worst case ranges+1 gaps
 	merged := make([]Range, 0, len(ranges)+1)
@@ -74,6 +59,14 @@ func Gaps(total Range, ranges []Range) []Range {
 	for i := 0; i < len(ranges); {
 		madded = false
 		m = ranges[i]
+
+		// skip empty ranges
+		if m.Len == 0 {
+			i++
+			madded = true
+			continue
+		}
+
 		j := i + 1
 		for ; j < len(ranges); j++ {
 			if m.Start <= ranges[j].Start && m.Stop()+1 >= ranges[j].Start {
@@ -92,8 +85,13 @@ func Gaps(total Range, ranges []Range) []Range {
 			break
 		}
 	}
+
 	if !madded {
 		merged = append(merged, m)
+	}
+
+	if len(merged) == 0 {
+		return []Range{total}
 	}
 
 	gaps := make([]Range, 0, len(merged))

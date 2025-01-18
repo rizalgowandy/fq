@@ -6,14 +6,13 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"io/ioutil"
 	"math/big"
 
 	"github.com/wader/fq/internal/aheadreadseeker"
-	"github.com/wader/fq/internal/bitioextra"
+	"github.com/wader/fq/internal/bitiox"
 	"github.com/wader/fq/internal/ctxreadseeker"
-	"github.com/wader/fq/internal/gojqextra"
-	"github.com/wader/fq/internal/ioextra"
+	"github.com/wader/fq/internal/gojqx"
+	"github.com/wader/fq/internal/iox"
 	"github.com/wader/fq/internal/progressreadseeker"
 	"github.com/wader/fq/pkg/bitio"
 	"github.com/wader/fq/pkg/ranges"
@@ -21,43 +20,46 @@ import (
 )
 
 func init() {
-	functionRegisterFns = append(functionRegisterFns, func(i *Interp) []Function {
-		return []Function{
-			{"_tobits", 3, 3, i._toBits, nil},
-			{"open", 0, 0, nil, i._open},
-		}
-	})
+	RegisterFunc1("_tobits", (*Interp)._toBits)
+	RegisterFunc0("open", (*Interp)._open)
 }
 
 type ToBinary interface {
 	ToBinary() (Binary, error)
 }
 
-func toBinary(v interface{}) (Binary, error) {
+func toBinary(v any) (Binary, error) {
 	switch vv := v.(type) {
 	case ToBinary:
 		return vv.ToBinary()
 	default:
-		br, err := toBitReader(v)
+		br, err := ToBitReader(v)
 		if err != nil {
 			return Binary{}, err
 		}
-		return newBinaryFromBitReader(br, 8, 0)
+		return NewBinaryFromBitReader(br, 8, 0)
 	}
 }
 
-func toBitReader(v interface{}) (bitio.ReaderAtSeeker, error) {
+func ToBitReader(v any) (bitio.ReaderAtSeeker, error) {
 	return toBitReaderEx(v, false)
 }
 
-func toBitReaderEx(v interface{}, inArray bool) (bitio.ReaderAtSeeker, error) {
+type byteRangeError int
+
+func (b byteRangeError) Error() string {
+	return fmt.Sprintf("byte in binary list must be bytes (0-255) got %d", int(b))
+
+}
+
+func toBitReaderEx(v any, inArray bool) (bitio.ReaderAtSeeker, error) {
 	switch vv := v.(type) {
 	case ToBinary:
 		bv, err := vv.ToBinary()
 		if err != nil {
 			return nil, err
 		}
-		return bitioextra.Range(bv.br, bv.r.Start, bv.r.Len)
+		return bitiox.Range(bv.br, bv.r.Start, bv.r.Len)
 	case string:
 		return bitio.NewBitReader([]byte(vv), -1), nil
 	case int, float64, *big.Int:
@@ -68,7 +70,7 @@ func toBitReaderEx(v interface{}, inArray bool) (bitio.ReaderAtSeeker, error) {
 
 		if inArray {
 			if bi.Cmp(big.NewInt(255)) > 0 || bi.Cmp(big.NewInt(0)) < 0 {
-				return nil, fmt.Errorf("byte in binary list must be bytes (0-255) got %v", bi)
+				return nil, byteRangeError(bi.Int64())
 			}
 			n := bi.Uint64()
 			b := [1]byte{byte(n)}
@@ -84,13 +86,48 @@ func toBitReaderEx(v interface{}, inArray bool) (bitio.ReaderAtSeeker, error) {
 		// TODO: how should this work? "0xf | tobytes" 4bits or 8bits? now 4
 		padBefore := (8 - (bitLen % 8)) % 8
 		// padBefore := 0
-		br, err := bitioextra.Range(bitio.NewBitReader(bi.Bytes(), -1), padBefore, bitLen)
+		br, err := bitiox.Range(bitio.NewBitReader(bi.Bytes(), -1), padBefore, bitLen)
 		if err != nil {
 			return nil, err
 		}
 		return br, nil
-	case []interface{}:
+	case []any:
 		rr := make([]bitio.ReadAtSeeker, 0, len(vv))
+
+		// fast path for slice containing only 0-255 numbers and strings
+		bs := &bytes.Buffer{}
+		for _, e := range vv {
+			if bs == nil {
+				break
+			}
+			switch ev := e.(type) {
+			case int:
+				if ev >= 0 && ev <= 255 {
+					bs.WriteByte(byte(ev))
+					continue
+				}
+			case float64:
+				b := int(ev)
+				if b >= 0 && b <= 255 {
+					bs.WriteByte(byte(ev))
+					continue
+				}
+			case *big.Int:
+				if ev.Cmp(big.NewInt(0)) >= 0 && ev.Cmp(big.NewInt(255)) <= 0 {
+					bs.WriteByte(byte(ev.Uint64()))
+					continue
+				}
+			case string:
+				// TODO: maybe only if less then some length?
+				bs.WriteString(ev)
+				continue
+			}
+			bs = nil
+		}
+		if bs != nil {
+			return bitio.NewBitReader(bs.Bytes(), -1), nil
+		}
+
 		// TODO: optimize byte array case, flatten into one slice
 		for _, e := range vv {
 			eBR, eErr := toBitReaderEx(e, true)
@@ -111,21 +148,14 @@ func toBitReaderEx(v interface{}, inArray bool) (bitio.ReaderAtSeeker, error) {
 	}
 }
 
-// note is used to implement tobytes* also
-func (i *Interp) _toBits(c interface{}, a []interface{}) interface{} {
-	unit, ok := gojqextra.ToInt(a[0])
-	if !ok {
-		return gojqextra.FuncTypeError{Name: "_tobits", V: a[0]}
-	}
-	keepRange, ok := gojqextra.ToBoolean(a[1])
-	if !ok {
-		return gojqextra.FuncTypeError{Name: "_tobits", V: a[1]}
-	}
-	padToUnits, ok := gojqextra.ToInt(a[2])
-	if !ok {
-		return gojqextra.FuncTypeError{Name: "_tobits", V: a[2]}
-	}
+type toBitsOpts struct {
+	Unit       int
+	KeepRange  bool
+	PadToUnits int
+}
 
+// note is used to implement tobytes* also
+func (i *Interp) _toBits(c any, opts toBitsOpts) any {
 	// TODO: unit > 8?
 
 	bv, err := toBinary(c)
@@ -133,15 +163,15 @@ func (i *Interp) _toBits(c interface{}, a []interface{}) interface{} {
 		return err
 	}
 
-	pad := int64(unit * padToUnits)
+	pad := int64(opts.Unit * opts.PadToUnits)
 	if pad == 0 {
-		pad = int64(unit)
+		pad = int64(opts.Unit)
 	}
 
-	bv.unit = unit
+	bv.unit = opts.Unit
 	bv.pad = (pad - bv.r.Len%pad) % pad
 
-	if keepRange {
+	if opts.KeepRange {
 		return bv
 	}
 
@@ -149,7 +179,7 @@ func (i *Interp) _toBits(c interface{}, a []interface{}) interface{} {
 	if err != nil {
 		return err
 	}
-	bb, err := newBinaryFromBitReader(br, bv.unit, bv.pad)
+	bb, err := NewBinaryFromBitReader(br, bv.unit, 0)
 	if err != nil {
 		return err
 	}
@@ -165,20 +195,22 @@ type openFile struct {
 var _ Value = (*openFile)(nil)
 var _ ToBinary = (*openFile)(nil)
 
-func (of *openFile) Display(w io.Writer, opts Options) error {
+func (of *openFile) Display(w io.Writer, opts *Options) error {
 	_, err := fmt.Fprintf(w, "<openfile %q>\n", of.filename)
 	return err
 }
 
 func (of *openFile) ToBinary() (Binary, error) {
-	return newBinaryFromBitReader(of.br, 8, 0)
+	return NewBinaryFromBitReader(of.br, 8, 0)
 }
 
 // opens a file for reading from filesystem
 // TODO: when to close? when br loses all refs? need to use finalizer somehow?
-func (i *Interp) _open(c interface{}, a []interface{}) gojq.Iter {
-	if i.evalInstance.isCompleting {
-		return gojq.NewIter()
+func (i *Interp) _open(c any) any {
+	if i.EvalInstance.IsCompleting {
+		// TODO: have dummy values for each type for completion?
+		br, _ := NewBinaryFromBitReader(bitio.NewBitReader([]byte{}, -1), 8, 0)
+		return br
 	}
 
 	var err error
@@ -188,20 +220,20 @@ func (i *Interp) _open(c interface{}, a []interface{}) gojq.Iter {
 	switch c.(type) {
 	case nil:
 		path = "<stdin>"
-		f = i.os.Stdin()
+		f = i.OS.Stdin()
 	default:
 		path, err = toString(c)
 		if err != nil {
-			return gojq.NewIter(fmt.Errorf("%s: %w", path, err))
+			return fmt.Errorf("%s: %w", path, err)
 		}
-		f, err = i.os.FS().Open(path)
+		f, err = i.OS.FS().Open(path)
 		if err != nil {
 			// path context added in jq error code
 			var pe *fs.PathError
 			if errors.As(err, &pe) {
-				return gojq.NewIter(pe.Err)
+				return pe.Err
 			}
-			return gojq.NewIter(err)
+			return err
 		}
 	}
 
@@ -211,25 +243,25 @@ func (i *Interp) _open(c interface{}, a []interface{}) gojq.Iter {
 	fFI, err := f.Stat()
 	if err != nil {
 		f.Close()
-		return gojq.NewIter(err)
+		return err
 	}
 
 	// ctxreadseeker is used to make sure any io calls can be canceled
-	// TODO: ctxreadseeker might leak if the underlaying call hangs forever
+	// TODO: ctxreadseeker might leak if the underlying call hangs forever
 
 	// a regular file should be seekable but fallback below to read whole file if not
 	if fFI.Mode().IsRegular() {
 		if rs, ok := f.(io.ReadSeeker); ok {
-			fRS = ctxreadseeker.New(i.evalInstance.ctx, rs)
+			fRS = ctxreadseeker.New(i.EvalInstance.Ctx, rs)
 			bEnd = fFI.Size()
 		}
 	}
 
 	if fRS == nil {
-		buf, err := ioutil.ReadAll(ctxreadseeker.New(i.evalInstance.ctx, &ioextra.ReadErrSeeker{Reader: f}))
+		buf, err := io.ReadAll(ctxreadseeker.New(i.EvalInstance.Ctx, &iox.ReadErrSeeker{Reader: f}))
 		if err != nil {
 			f.Close()
-			return gojq.NewIter(err)
+			return err
 		}
 		fRS = bytes.NewReader(buf)
 		bEnd = int64(len(buf))
@@ -255,11 +287,8 @@ func (i *Interp) _open(c interface{}, a []interface{}) gojq.Iter {
 	// bitio.Buffer -> (bitio.Reader) -> aheadreadseeker -> progressreadseeker -> ctxreadseeker -> readseeker
 
 	bbf.br = bitio.NewIOBitReadSeeker(aheadRs)
-	if err != nil {
-		return gojq.NewIter(err)
-	}
 
-	return gojq.NewIter(bbf)
+	return bbf
 }
 
 var _ Value = Binary{}
@@ -272,8 +301,8 @@ type Binary struct {
 	pad  int64
 }
 
-func newBinaryFromBitReader(br bitio.ReaderAtSeeker, unit int, pad int64) (Binary, error) {
-	l, err := bitioextra.Len(br)
+func NewBinaryFromBitReader(br bitio.ReaderAtSeeker, unit int, pad int64) (Binary, error) {
+	l, err := bitiox.Len(br)
 	if err != nil {
 		return Binary{}, err
 	}
@@ -287,12 +316,12 @@ func newBinaryFromBitReader(br bitio.ReaderAtSeeker, unit int, pad int64) (Binar
 }
 
 func (b Binary) toBytesBuffer(r ranges.Range) (*bytes.Buffer, error) {
-	br, err := bitioextra.Range(b.br, r.Start, r.Len)
+	br, err := bitiox.Range(b.br, r.Start, r.Len)
 	if err != nil {
 		return nil, err
 	}
 	buf := &bytes.Buffer{}
-	if _, err := bitioextra.CopyBits(buf, br); err != nil {
+	if _, err := bitiox.CopyBits(buf, br); err != nil {
 		return nil, err
 	}
 
@@ -303,11 +332,13 @@ func (Binary) ExtType() string { return "binary" }
 
 func (Binary) ExtKeys() []string {
 	return []string{
+		"bits",
+		"bytes",
+		"name",
 		"size",
 		"start",
 		"stop",
-		"bits",
-		"bytes",
+		"unit",
 	}
 }
 
@@ -315,14 +346,14 @@ func (b Binary) ToBinary() (Binary, error) {
 	return b, nil
 }
 
-func (b Binary) JQValueLength() interface{} {
+func (b Binary) JQValueLength() any {
 	return int(b.r.Len / int64(b.unit))
 }
-func (b Binary) JQValueSliceLen() interface{} {
+func (b Binary) JQValueSliceLen() any {
 	return b.JQValueLength()
 }
 
-func (b Binary) JQValueIndex(index int) interface{} {
+func (b Binary) JQValueIndex(index int) any {
 	if index < 0 {
 		return nil
 	}
@@ -336,7 +367,7 @@ func (b Binary) JQValueIndex(index int) interface{} {
 
 	return new(big.Int).Rsh(new(big.Int).SetBytes(buf.Bytes()), extraBits)
 }
-func (b Binary) JQValueSlice(start int, end int) interface{} {
+func (b Binary) JQValueSlice(start int, end int) any {
 	rStart := int64(start * b.unit)
 	rLen := int64((end - start) * b.unit)
 
@@ -346,8 +377,26 @@ func (b Binary) JQValueSlice(start int, end int) interface{} {
 		unit: b.unit,
 	}
 }
-func (b Binary) JQValueKey(name string) interface{} {
+func (b Binary) JQValueKey(name string) any {
 	switch name {
+	case "bits":
+		if b.unit == 1 {
+			return b
+		}
+		return Binary{br: b.br, r: b.r, unit: 1}
+	case "bytes":
+		if b.unit == 8 {
+			return b
+		}
+		return Binary{br: b.br, r: b.r, unit: 8}
+
+	case "name":
+		f := iox.Unwrap(b.br)
+		// this exploits the fact that *os.File has Name()
+		if n, ok := f.(interface{ Name() string }); ok {
+			return n.Name()
+		}
+		return nil
 	case "size":
 		return new(big.Int).SetInt64(b.r.Len / int64(b.unit))
 	case "start":
@@ -359,32 +408,24 @@ func (b Binary) JQValueKey(name string) interface{} {
 			stopUnits++
 		}
 		return new(big.Int).SetInt64(stopUnits)
-	case "bits":
-		if b.unit == 1 {
-			return b
-		}
-		return Binary{br: b.br, r: b.r, unit: 1}
-	case "bytes":
-		if b.unit == 8 {
-			return b
-		}
-		return Binary{br: b.br, r: b.r, unit: 8}
+	case "unit":
+		return b.unit
 	}
 	return nil
 }
-func (b Binary) JQValueEach() interface{} {
+func (b Binary) JQValueEach() any {
 	return nil
 }
 func (b Binary) JQValueType() string {
-	return "binary"
+	return gojq.JQTypeString
 }
-func (b Binary) JQValueKeys() interface{} {
-	return gojqextra.FuncTypeNameError{Name: "keys", Typ: "binary"}
+func (b Binary) JQValueKeys() any {
+	return gojqx.FuncTypeNameError{Name: "keys", Typ: gojq.JQTypeString}
 }
-func (b Binary) JQValueHas(key interface{}) interface{} {
-	return gojqextra.HasKeyTypeError{L: "binary", R: fmt.Sprintf("%v", key)}
+func (b Binary) JQValueHas(key any) any {
+	return gojqx.HasKeyTypeError{L: gojq.JQTypeString, R: fmt.Sprintf("%v", key)}
 }
-func (b Binary) JQValueToNumber() interface{} {
+func (b Binary) JQValueToNumber() any {
 	buf, err := b.toBytesBuffer(b.r)
 	if err != nil {
 		return err
@@ -392,28 +433,49 @@ func (b Binary) JQValueToNumber() interface{} {
 	extraBits := uint((8 - b.r.Len%8) % 8)
 	return new(big.Int).Rsh(new(big.Int).SetBytes(buf.Bytes()), extraBits)
 }
-func (b Binary) JQValueToString() interface{} {
+func (b Binary) JQValueToString() any {
 	return b.JQValueToGoJQ()
 }
-func (b Binary) JQValueToGoJQ() interface{} {
+func (b Binary) JQValueToGoJQEx(optsFn func() (*Options, error)) any {
+	br, err := b.toReader()
+	if err != nil {
+		return err
+	}
+
+	brC, err := bitio.CloneReaderAtSeeker(br)
+	if err != nil {
+		return err
+	}
+
+	opts, err := optsFn()
+	if err != nil {
+		return err
+	}
+
+	s, err := opts.BitsFormatFn(brC)
+	if err != nil {
+		return err
+	}
+
+	return s
+}
+
+func (b Binary) JQValueToGoJQ() any {
 	buf, err := b.toBytesBuffer(b.r)
 	if err != nil {
 		return err
 	}
 	return buf.String()
 }
-func (b Binary) JQValueUpdate(key interface{}, u interface{}, delpath bool) interface{} {
-	return gojqextra.NonUpdatableTypeError{Key: fmt.Sprintf("%v", key), Typ: "binary"}
-}
 
-func (b Binary) Display(w io.Writer, opts Options) error {
+func (b Binary) Display(w io.Writer, opts *Options) error {
 	if opts.RawOutput {
 		br, err := b.toReader()
 		if err != nil {
 			return err
 		}
 
-		if _, err := bitioextra.CopyBits(w, br); err != nil {
+		if _, err := bitiox.CopyBits(w, br); err != nil {
 			return err
 		}
 
@@ -424,12 +486,12 @@ func (b Binary) Display(w io.Writer, opts Options) error {
 }
 
 func (b Binary) toReader() (bitio.ReaderAtSeeker, error) {
-	br, err := bitioextra.Range(b.br, b.r.Start, b.r.Len)
+	br, err := bitiox.Range(b.br, b.r.Start, b.r.Len)
 	if err != nil {
 		return nil, err
 	}
 	if b.pad == 0 {
 		return br, nil
 	}
-	return bitio.NewMultiReader(bitioextra.NewZeroAtSeeker(b.pad), br)
+	return bitio.NewMultiReader(bitiox.NewZeroAtSeeker(b.pad), br)
 }
