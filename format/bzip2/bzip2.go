@@ -13,24 +13,25 @@ import (
 	"math/bits"
 
 	"github.com/wader/fq/format"
-	"github.com/wader/fq/format/registry"
 	"github.com/wader/fq/pkg/bitio"
 	"github.com/wader/fq/pkg/decode"
+	"github.com/wader/fq/pkg/interp"
 	"github.com/wader/fq/pkg/scalar"
 )
 
 var probeGroup decode.Group
 
 func init() {
-	registry.MustRegister(decode.Format{
-		Name:        format.BZIP2,
-		Description: "bzip2 compression",
-		Groups:      []string{format.PROBE},
-		DecodeFn:    bzip2Decode,
-		Dependencies: []decode.Dependency{
-			{Names: []string{format.PROBE}, Group: &probeGroup},
-		},
-	})
+	interp.RegisterFormat(
+		format.Bzip2,
+		&decode.Format{
+			Description: "bzip2 compression",
+			Groups:      []*decode.Group{format.Probe},
+			DecodeFn:    bzip2Decode,
+			Dependencies: []decode.Dependency{
+				{Groups: []*decode.Group{format.Probe}, Out: &probeGroup},
+			},
+		})
 }
 
 const blockMagic = 0x31_41_59_26_53_59
@@ -48,7 +49,7 @@ func (bfr bitFlipReader) Read(p []byte) (n int, err error) {
 	return n, err
 }
 
-func bzip2Decode(d *decode.D, in interface{}) interface{} {
+func bzip2Decode(d *decode.D) any {
 	// moreStreams := true
 
 	// d.FieldArray("streams", func(d *decode.D) {
@@ -58,7 +59,7 @@ func bzip2Decode(d *decode.D, in interface{}) interface{} {
 	var blockCRCValue *decode.Value
 	var streamCRCN uint32
 
-	d.FieldUTF8("magic", 2, d.AssertStr("BZ"))
+	d.FieldUTF8("magic", 2, d.StrAssert("BZ"))
 	d.FieldU8("version")
 	d.FieldU8("hundred_k_blocksize")
 
@@ -67,8 +68,8 @@ func bzip2Decode(d *decode.D, in interface{}) interface{} {
 		// 	moreStreams = false
 		// 	return
 		// }
-		d.FieldU48("magic", d.AssertU(blockMagic), scalar.Hex)
-		d.FieldU32("crc", scalar.Hex)
+		d.FieldU48("magic", d.UintAssert(blockMagic), scalar.UintHex)
+		d.FieldU32("crc", scalar.UintHex)
 		blockCRCValue = d.FieldGet("crc")
 		d.FieldU1("randomised")
 		d.FieldU24("origptr")
@@ -91,7 +92,7 @@ func bzip2Decode(d *decode.D, in interface{}) interface{} {
 		})
 		treesI := uint64(0)
 		d.FieldArrayLoop("trees", func() bool { return treesI < numTrees }, func(d *decode.D) {
-			d.FieldUFn("tree", func(d *decode.D) uint64 {
+			d.FieldUintFn("tree", func(d *decode.D) uint64 {
 				l := d.U5()
 				if !d.Bool() {
 					return l
@@ -109,16 +110,17 @@ func bzip2Decode(d *decode.D, in interface{}) interface{} {
 
 	compressedStart := d.Pos()
 
-	readCompressedSize, uncompressedBR, dv, _, _ := d.TryFieldReaderRangeFormat("uncompressed", 0, d.Len(), bzip2.NewReader, probeGroup, nil)
+	readCompressedSize, uncompressedBR, dv, _, _ :=
+		d.TryFieldReaderRangeFormat("uncompressed", 0, d.Len(), bzip2.NewReader, &probeGroup, format.Probe_In{})
 	if uncompressedBR != nil {
 		if dv == nil {
 			d.FieldRootBitBuf("uncompressed", uncompressedBR)
 		}
 
 		blockCRC32W := crc32.NewIEEE()
-		d.MustCopy(blockCRC32W, bitFlipReader{bitio.NewIOReader(uncompressedBR)})
+		d.Copy(blockCRC32W, bitFlipReader{bitio.NewIOReader(uncompressedBR)})
 		blockCRC32N := bits.Reverse32(binary.BigEndian.Uint32(blockCRC32W.Sum(nil)))
-		_ = blockCRCValue.TryScalarFn(d.ValidateU(uint64(blockCRC32N)))
+		_ = blockCRCValue.TryUintScalarFn(d.UintValidate(uint64(blockCRC32N)))
 		streamCRCN = blockCRC32N ^ ((streamCRCN << 1) | (streamCRCN >> 31))
 
 		// HACK: bzip2.NewReader will read from start of whole buffer and then we figure out compressedSize ourself
@@ -127,7 +129,7 @@ func bzip2Decode(d *decode.D, in interface{}) interface{} {
 		compressedSize := (readCompressedSize - compressedStart) - footerByteSize*8
 		for i := 0; i < 8; i++ {
 			d.SeekAbs(compressedStart + compressedSize)
-			if d.PeekBits(48) == footerMagic {
+			if d.PeekUintBits(48) == footerMagic {
 				break
 			}
 			compressedSize--
@@ -137,9 +139,9 @@ func bzip2Decode(d *decode.D, in interface{}) interface{} {
 		d.FieldRawLen("compressed", compressedSize)
 
 		d.FieldStruct("footer", func(d *decode.D) {
-			d.FieldU48("magic", d.AssertU(footerMagic), scalar.Hex)
+			d.FieldU48("magic", d.UintAssert(footerMagic), scalar.UintHex)
 			// TODO: crc of block crcs
-			d.FieldU32("crc", scalar.Hex, d.ValidateU(uint64(streamCRCN)))
+			d.FieldU32("crc", scalar.UintHex, d.UintValidate(uint64(streamCRCN)))
 			d.FieldRawLen("padding", int64(d.ByteAlignBits()))
 		})
 	}

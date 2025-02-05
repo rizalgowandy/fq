@@ -5,28 +5,29 @@ import (
 	"net"
 
 	"github.com/wader/fq/format"
-	"github.com/wader/fq/format/registry"
 	"github.com/wader/fq/pkg/bitio"
 	"github.com/wader/fq/pkg/checksum"
 	"github.com/wader/fq/pkg/decode"
+	"github.com/wader/fq/pkg/interp"
 	"github.com/wader/fq/pkg/scalar"
 )
 
-var udpPacketFormat decode.Group
-var tcpPacketFormat decode.Group
-var icmpFormat decode.Group
+var ipv4IpPacketGroup decode.Group
 
 func init() {
-	registry.MustRegister(decode.Format{
-		Name:        format.IPV4_PACKET,
-		Description: "Internet protocol v4 packet",
-		Dependencies: []decode.Dependency{
-			{Names: []string{format.UDP_DATAGRAM}, Group: &udpPacketFormat},
-			{Names: []string{format.TCP_SEGMENT}, Group: &tcpPacketFormat},
-			{Names: []string{format.ICMP}, Group: &icmpFormat},
-		},
-		DecodeFn: decodeIPv4,
-	})
+	interp.RegisterFormat(
+		format.IPv4Packet,
+		&decode.Format{
+			Description: "Internet protocol v4 packet",
+			Groups: []*decode.Group{
+				format.INET_Packet,
+				format.Link_Frame,
+			},
+			Dependencies: []decode.Dependency{
+				{Groups: []*decode.Group{format.IP_Packet}, Out: &ipv4IpPacketGroup},
+			},
+			DecodeFn: decodeIPv4,
+		})
 }
 
 const (
@@ -34,7 +35,7 @@ const (
 	ipv4OptionNop = 1
 )
 
-var ipv4OptionsMap = scalar.UToScalar{
+var ipv4OptionsMap = scalar.UintMap{
 	ipv4OptionEnd: {Sym: "end", Description: "End of options list"},
 	ipv4OptionNop: {Sym: "nop", Description: "No operation"},
 	2:             {Description: "Security"},
@@ -45,21 +46,23 @@ var ipv4OptionsMap = scalar.UToScalar{
 	4:             {Description: "Internet Timestamp"},
 }
 
-var ipv4ProtocolFormat = map[uint64]*decode.Group{
-	format.IPv4ProtocolUDP:  &udpPacketFormat,
-	format.IPv4ProtocolTCP:  &tcpPacketFormat,
-	format.IPv4ProtocolICMP: &icmpFormat,
-}
-
-var mapUToIPv4Sym = scalar.Fn(func(s scalar.S) (scalar.S, error) {
+var mapUToIPv4Sym = scalar.UintFn(func(s scalar.Uint) (scalar.Uint, error) {
 	var b [4]byte
-	binary.BigEndian.PutUint32(b[:], uint32(s.ActualU()))
+	binary.BigEndian.PutUint32(b[:], uint32(s.Actual))
 	s.Sym = net.IP(b[:]).String()
 	return s, nil
 })
 
-func decodeIPv4(d *decode.D, in interface{}) interface{} {
-	d.FieldU4("version")
+func decodeIPv4(d *decode.D) any {
+	var ipi format.INET_Packet_In
+	var lfi format.Link_Frame_In
+	if d.ArgAs(&ipi) && ipi.EtherType != format.EtherTypeIPv4 {
+		d.Fatalf("incorrect ethertype %d", ipi.EtherType)
+	} else if d.ArgAs(&lfi) && lfi.Type != format.LinkTypeIPv4 && lfi.Type != format.LinkTypeRAW {
+		d.Fatalf("incorrect linktype %d", lfi.Type)
+	}
+
+	d.FieldU4("version", d.UintAssert(4))
 	ihl := d.FieldU4("ihl")
 	d.FieldU6("dscp")
 	d.FieldU2("ecn")
@@ -72,10 +75,10 @@ func decodeIPv4(d *decode.D, in interface{}) interface{} {
 	d.FieldU8("ttl")
 	protocol := d.FieldU8("protocol", format.IPv4ProtocolMap)
 	checksumStart := d.Pos()
-	d.FieldU16("header_checksum", scalar.Hex)
+	d.FieldU16("header_checksum", scalar.UintHex)
 	checksumEnd := d.Pos()
-	d.FieldU32("source_ip", mapUToIPv4Sym, scalar.Hex)
-	d.FieldU32("destination_ip", mapUToIPv4Sym, scalar.Hex)
+	d.FieldU32("source_ip", mapUToIPv4Sym, scalar.UintHex)
+	d.FieldU32("destination_ip", mapUToIPv4Sym, scalar.UintHex)
 	optionsLen := (int64(ihl) - 5) * 8 * 4
 	if optionsLen > 0 {
 		d.FramedFn(optionsLen, func(d *decode.D) {
@@ -99,16 +102,21 @@ func decodeIPv4(d *decode.D, in interface{}) interface{} {
 	headerEnd := d.Pos()
 
 	ipv4Checksum := &checksum.IPv4{}
-	d.MustCopy(ipv4Checksum, bitio.NewIOReader(d.BitBufRange(0, checksumStart)))
-	d.MustCopy(ipv4Checksum, bitio.NewIOReader(d.BitBufRange(checksumEnd, headerEnd-checksumEnd)))
-	_ = d.FieldMustGet("header_checksum").TryScalarFn(d.ValidateUBytes(ipv4Checksum.Sum(nil)), scalar.Hex)
+	d.Copy(ipv4Checksum, bitio.NewIOReader(d.BitBufRange(0, checksumStart)))
+	d.Copy(ipv4Checksum, bitio.NewIOReader(d.BitBufRange(checksumEnd, headerEnd-checksumEnd)))
+	_ = d.FieldMustGet("header_checksum").TryUintScalarFn(d.UintValidateBytes(ipv4Checksum.Sum(nil)), scalar.UintHex)
 
 	dataLen := int64(totalLength-(ihl*4)) * 8
-	g, ok := ipv4ProtocolFormat[protocol]
-	if !ok || moreFragments || fragmentOffset > 0 {
-		d.FieldRawLen("data", dataLen)
+
+	if moreFragments || fragmentOffset > 0 {
+		d.FieldRawLen("payload", dataLen)
 	} else {
-		d.FieldFormatLen("data", dataLen, *g, nil)
+		d.FieldFormatOrRawLen(
+			"payload",
+			dataLen,
+			&ipv4IpPacketGroup,
+			format.IP_Packet_In{Protocol: int(protocol)},
+		)
 	}
 
 	return nil

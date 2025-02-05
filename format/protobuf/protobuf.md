@@ -1,5 +1,8 @@
-`protobuf` decoder can be used to decode sub messages:
+### Can decode sub messages
 
+```sh
+$ fq -d protobuf '.fields[6].wire_value | protobuf | d' file
 ```
-fq -d protobuf '.fields[6].wire_value | protobuf | d'
-```
+
+### References
+- https://developers.google.com/protocol-buffers/docs/encoding

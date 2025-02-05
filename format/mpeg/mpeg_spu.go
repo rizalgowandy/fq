@@ -9,20 +9,20 @@ import (
 	"strings"
 
 	"github.com/wader/fq/format"
-	"github.com/wader/fq/format/registry"
 	"github.com/wader/fq/pkg/decode"
+	"github.com/wader/fq/pkg/interp"
 	"github.com/wader/fq/pkg/scalar"
 )
 
 func init() {
-	registry.MustRegister(decode.Format{
-		Name:        format.MPEG_SPU,
-		Description: "Sub Picture Unit (DVD subtitle)",
-		DecodeFn:    spuDecode,
-	})
+	interp.RegisterFormat(
+		format.MPEG_SPU,
+		&decode.Format{
+			Description: "Sub Picture Unit (DVD subtitle)",
+			DecodeFn:    spuDecode,
+		})
 }
 
-//nolint:revive
 const (
 	CMD_END    = 0xff
 	FSTA_DSP   = 0x00
@@ -35,7 +35,7 @@ const (
 	CHG_COLCON = 0x07
 )
 
-var commandNames = scalar.UToSymStr{
+var commandNames = scalar.UintMapSymStr{
 	CMD_END:    "CMD_END",
 	FSTA_DSP:   "FSTA_DSP",
 	STA_DSP:    "STA_DSP",
@@ -48,7 +48,7 @@ var commandNames = scalar.UToSymStr{
 }
 
 func rleValue(d *decode.D) (uint64, uint64, int) {
-	p := uint(d.PeekBits(8))
+	p := uint(d.PeekUintBits(8))
 
 	// match zero prefix
 	switch {
@@ -70,7 +70,8 @@ func rleValue(d *decode.D) (uint64, uint64, int) {
 	}
 }
 
-func decodeLines(d *decode.D, lines int, width int) []string { //nolint:unparam
+//nolint:unparam
+func decodeLines(d *decode.D, lines int, width int) []string {
 	var ls []string
 
 	for i := 0; i < lines; i++ {
@@ -99,7 +100,7 @@ func decodeLines(d *decode.D, lines int, width int) []string { //nolint:unparam
 	return ls
 }
 
-func spuDecode(d *decode.D, in interface{}) interface{} {
+func spuDecode(d *decode.D) any {
 	d.FieldU16("size")
 	dcsqtOffset := d.FieldU16("dcsqt_offset")
 

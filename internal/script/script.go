@@ -2,6 +2,7 @@ package script
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -10,7 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -18,6 +19,39 @@ import (
 	"github.com/wader/fq/pkg/bitio"
 	"github.com/wader/fq/pkg/interp"
 )
+
+var unescapeRe = regexp.MustCompile(`\\(?:t|b|n|r|0(?:b[01]{8}|x[0-f]{2}))`)
+
+func Unescape(s string) string {
+	return unescapeRe.ReplaceAllStringFunc(s, func(r string) string {
+		switch {
+		case r == `\n`:
+			return "\n"
+		case r == `\r`:
+			return "\r"
+		case r == `\t`:
+			return "\t"
+		case r == `\b`:
+			return "\b"
+		case strings.HasPrefix(r, `\0b`):
+			b, _ := bitio.BytesFromBitString(r[3:])
+			return string(b)
+		case strings.HasPrefix(r, `\0x`):
+			b, _ := hex.DecodeString(r[3:])
+			return string(b)
+		default:
+			return r
+		}
+	})
+}
+
+var escapeRe = regexp.MustCompile(`[^[:print:][:space:]]`)
+
+func Escape(s string) string {
+	return string(escapeRe.ReplaceAllFunc([]byte(s), func(r []byte) []byte {
+		return []byte(fmt.Sprintf(`\0x%.2x`, r[0]))
+	}))
+}
 
 type CaseReadline struct {
 	expr           string
@@ -84,8 +118,9 @@ func (cr *CaseRun) getEnvInt(name string) int {
 
 func (cr *CaseRun) Platform() interp.Platform {
 	return interp.Platform{
-		OS:   "testos",
-		Arch: "testarch",
+		OS:        "testos",
+		Arch:      "testarch",
+		GoVersion: "testgo_version",
 	}
 }
 
@@ -94,16 +129,21 @@ func (cr *CaseRun) Stdin() interp.Input {
 		FileReader: interp.FileReader{
 			R: bytes.NewBufferString(cr.StdinInitial),
 		},
-		isTerminal: cr.StdinInitial == "",
+		isTerminal: cr.StdinInitial == "" || cr.getEnvInt("_STDIN_IS_TERMINAL") != 0,
 		width:      cr.getEnvInt("_STDIN_WIDTH"),
 		height:     cr.getEnvInt("_STDIN_HEIGHT"),
 	}
 }
 
 func (cr *CaseRun) Stdout() interp.Output {
+	var w io.Writer = cr.ActualStdoutBuf
+	if cr.getEnvInt("_STDOUT_HEX") != 0 {
+		w = hex.NewEncoder(cr.ActualStdoutBuf)
+	}
+
 	return CaseRunOutput{
-		Writer:   cr.ActualStdoutBuf,
-		Terminal: cr.getEnvInt("_STDOUT_ISTERMINAL") != 0,
+		Writer:   w,
+		Terminal: cr.getEnvInt("_STDOUT_IS_TERMINAL") != 0,
 		Width:    cr.getEnvInt("_STDOUT_WIDTH"),
 		Height:   cr.getEnvInt("_STDOUT_HEIGHT"),
 	}
@@ -121,7 +161,8 @@ func (cr *CaseRun) Environ() []string {
 		"_STDIN_HEIGHT=25",
 		"_STDOUT_WIDTH=135",
 		"_STDOUT_HEIGHT=25",
-		"_STDOUT_ISTERMINAL=1",
+		"_STDOUT_IS_TERMINAL=1",
+		"_STDIN_IS_TERMINAL=0",
 		"NO_COLOR=1",
 		"NO_DECODE_PROGRESS=1",
 		"COMPLETION_TIMEOUT=10", // increase to make -race work better
@@ -235,9 +276,7 @@ type Case struct {
 func (c *Case) ToActual() string {
 	var partsLineSorted []part
 	partsLineSorted = append(partsLineSorted, c.Parts...)
-	sort.Slice(partsLineSorted, func(i, j int) bool {
-		return partsLineSorted[i].Line() < partsLineSorted[j].Line()
-	})
+	slices.SortFunc(partsLineSorted, func(a, b part) int { return cmp.Compare(a.Line(), b.Line()) })
 
 	sb := &strings.Builder{}
 	for _, p := range partsLineSorted {
@@ -303,9 +342,20 @@ func normalizeOSError(err error) error {
 }
 
 func (c *Case) Open(name string) (fs.File, error) {
+	const testData = "testdata"
+	testDataIndex := strings.Index(c.Path, testData)
+	// cwd is directory where current script file is
+	testRoot := c.Path[0 : testDataIndex+len(testData)]
+	testCwd := filepath.Dir(c.Path[testDataIndex+len(testData):])
+	testAbsPath := filepath.Join(testCwd, name)
+	fsPath := filepath.Join(testRoot, testAbsPath)
+
 	for _, p := range c.Parts {
 		f, ok := p.(*caseFile)
-		if ok && f.name == name {
+		if !ok {
+			continue
+		}
+		if f.name == filepath.ToSlash(testAbsPath) {
 			return interp.FileReader{
 				R: io.NewSectionReader(bytes.NewReader(f.data), 0, int64(len(f.data))),
 				FileInfo: interp.FixedFileInfo{
@@ -315,7 +365,7 @@ func (c *Case) Open(name string) (fs.File, error) {
 			}, nil
 		}
 	}
-	f, err := os.Open(filepath.Join(filepath.Dir(c.Path), name))
+	f, err := os.Open(fsPath)
 	// normalizeOSError is used to normalize OS specific path and messages into the ones unix uses
 	// this needed to make difftest work
 	return f, normalizeOSError(err)
@@ -325,31 +375,8 @@ type Section struct {
 	LineNr int
 	Name   string
 	Value  string
-}
 
-var unescapeRe = regexp.MustCompile(`\\(?:t|b|n|r|0(?:b[01]{8}|x[0-f]{2}))`)
-
-func Unescape(s string) string {
-	return unescapeRe.ReplaceAllStringFunc(s, func(r string) string {
-		switch {
-		case r == `\n`:
-			return "\n"
-		case r == `\r`:
-			return "\r"
-		case r == `\t`:
-			return "\t"
-		case r == `\b`:
-			return "\b"
-		case strings.HasPrefix(r, `\0b`):
-			b, _ := bitio.BytesFromBitString(r[3:])
-			return string(b)
-		case strings.HasPrefix(r, `\0x`):
-			b, _ := hex.DecodeString(r[3:])
-			return string(b)
-		default:
-			return r
-		}
-	})
+	valueSB strings.Builder
 }
 
 func SectionParser(re *regexp.Regexp, s string) []Section {
@@ -383,9 +410,14 @@ func SectionParser(re *regexp.Regexp, s string) []Section {
 			cs.LineNr = lineNr
 			cs.Name = firstMatch(sm, func(s string) bool { return len(s) != 0 })
 		} else {
-			// TODO: use builder somehow if performance is needed
-			cs.Value += l + lineDelim
+			cs.valueSB.WriteString(l)
+			cs.valueSB.WriteString(lineDelim)
 		}
+	}
+
+	for i := range sections {
+		cs := &sections[i]
+		cs.Value = cs.valueSB.String()
 	}
 
 	return sections

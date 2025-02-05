@@ -84,3 +84,23 @@ func (r *IOBitReadSeeker) SeekBits(bitOff int64, whence int) (int64, error) {
 
 	return seekBitPos, nil
 }
+
+func (r *IOBitReadSeeker) CloneReader() (Reader, error) {
+	return r.CloneReaderAtSeeker()
+}
+
+func (r *IOBitReadSeeker) CloneReadSeeker() (ReadSeeker, error) {
+	return r.CloneReaderAtSeeker()
+}
+
+func (r *IOBitReadSeeker) CloneReadAtSeeker() (ReadAtSeeker, error) {
+	return r.CloneReaderAtSeeker()
+}
+
+func (r *IOBitReadSeeker) CloneReaderAtSeeker() (ReaderAtSeeker, error) {
+	return NewIOBitReadSeeker(r.rs), nil
+}
+
+func (r *IOBitReadSeeker) Unwrap() any {
+	return r.rs
+}

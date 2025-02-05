@@ -5,23 +5,24 @@ package icc
 
 import (
 	"github.com/wader/fq/format"
-	"github.com/wader/fq/format/registry"
-	"github.com/wader/fq/internal/mathextra"
 	"github.com/wader/fq/pkg/decode"
+	"github.com/wader/fq/pkg/interp"
+	"github.com/wader/fq/pkg/scalar"
 )
 
 func init() {
-	registry.MustRegister(decode.Format{
-		Name:        format.ICC_PROFILE,
-		Description: "International Color Consortium profile",
-		DecodeFn:    iccProfileDecode,
-	})
+	interp.RegisterFormat(
+		format.ICC_Profile,
+		&decode.Format{
+			Description: "International Color Consortium profile",
+			DecodeFn:    iccProfileDecode,
+		})
 }
 
 func xyzType(_ int64, d *decode.D) {
-	d.FieldFP32("X")
-	d.FieldFP32("Y")
-	d.FieldFP32("Z")
+	d.FieldFP32("x")
+	d.FieldFP32("y")
+	d.FieldFP32("z")
 }
 
 func textType(_ int64, d *decode.D) {
@@ -69,7 +70,7 @@ func multiLocalizedUnicodeType(tagStart int64, d *decode.D) {
 }
 
 var typeToDecode = map[string]func(tagStart int64, d *decode.D){
-	"XYZ ": xyzType,
+	"XYZ":  xyzType,
 	"text": textType,
 	"para": paraType,
 	"desc": descType,
@@ -81,7 +82,7 @@ func decodeBCDU8(d *decode.D) uint64 {
 	return (n>>4)*10 + n&0xf
 }
 
-func iccProfileDecode(d *decode.D, in interface{}) interface{} {
+func iccProfileDecode(d *decode.D) any {
 	/*
 	   0..3 Profile size uInt32Number
 	   4..7 CMM Type signature see below
@@ -110,13 +111,13 @@ func iccProfileDecode(d *decode.D, in interface{}) interface{} {
 	d.FramedFn(int64(size)*8, func(d *decode.D) {
 		d.FieldStruct("header", func(d *decode.D) {
 			d.FieldU32("size")
-			d.FieldUTF8NullFixedLen("cmm_type_signature", 4)
-			d.FieldUFn("version_major", decodeBCDU8)
-			d.FieldUFn("version_minor", decodeBCDU8)
+			d.FieldUTF8NullFixedLen("cmm_type_signature", 4, scalar.ActualTrimSpace)
+			d.FieldUintFn("version_major", decodeBCDU8)
+			d.FieldUintFn("version_minor", decodeBCDU8)
 			d.FieldU16("version_reserved")
-			d.FieldUTF8NullFixedLen("device_class_signature", 4)
-			d.FieldUTF8NullFixedLen("color_space", 4)
-			d.FieldUTF8NullFixedLen("connection_space", 4)
+			d.FieldUTF8NullFixedLen("device_class_signature", 4, scalar.ActualTrimSpace)
+			d.FieldUTF8NullFixedLen("color_space", 4, scalar.ActualTrimSpace)
+			d.FieldUTF8NullFixedLen("connection_space", 4, scalar.ActualTrimSpace)
 			d.FieldStruct("timestamp", func(d *decode.D) {
 				d.FieldU16("year")
 				d.FieldU16("month")
@@ -126,16 +127,16 @@ func iccProfileDecode(d *decode.D, in interface{}) interface{} {
 				d.FieldU16("seconds")
 
 			})
-			d.FieldUTF8NullFixedLen("file_signature", 4)
-			d.FieldUTF8NullFixedLen("primary_platform", 4)
+			d.FieldUTF8NullFixedLen("file_signature", 4, scalar.ActualTrimSpace)
+			d.FieldUTF8NullFixedLen("primary_platform", 4, scalar.ActualTrimSpace)
 			d.FieldU32("flags")
-			d.FieldUTF8NullFixedLen("device_manufacturer", 4)
-			d.FieldUTF8NullFixedLen("device_model", 4)
-			d.FieldUTF8NullFixedLen("device_attribute", 8)
-			d.FieldUTF8NullFixedLen("render_intent", 4)
-			d.FieldUTF8NullFixedLen("xyz_illuminant", 12)
-			d.FieldUTF8NullFixedLen("profile_creator_signature", 4)
-			d.FieldUTF8NullFixedLen("profile_id", 16)
+			d.FieldUTF8NullFixedLen("device_manufacturer", 4, scalar.ActualTrimSpace)
+			d.FieldUTF8NullFixedLen("device_model", 4, scalar.ActualTrimSpace)
+			d.FieldUTF8NullFixedLen("device_attribute", 8, scalar.ActualTrimSpace)
+			d.FieldUTF8NullFixedLen("render_intent", 4, scalar.ActualTrimSpace)
+			d.FieldUTF8NullFixedLen("xyz_illuminant", 12, scalar.ActualTrimSpace)
+			d.FieldUTF8NullFixedLen("profile_creator_signature", 4, scalar.ActualTrimSpace)
+			d.FieldUTF8NullFixedLen("profile_id", 16, scalar.ActualTrimSpace)
 			d.FieldRawLen("reserved", 28*8, d.BitBufIsZero())
 		})
 
@@ -144,13 +145,13 @@ func iccProfileDecode(d *decode.D, in interface{}) interface{} {
 			d.FieldArray("table", func(d *decode.D) {
 				for i := uint64(0); i < tagCount; i++ {
 					d.FieldStruct("element", func(d *decode.D) {
-						d.FieldUTF8NullFixedLen("signature", 4)
+						d.FieldUTF8NullFixedLen("signature", 4, scalar.ActualTrimSpace)
 						offset := d.FieldU32("offset")
 						size := d.FieldU32("size")
 
 						d.RangeFn(int64(offset)*8, int64(size)*8, func(d *decode.D) {
 							tagStart := d.Pos()
-							typ := d.FieldUTF8NullFixedLen("type", 4)
+							typ := d.FieldUTF8NullFixedLen("type", 4, scalar.ActualTrimSpace)
 							d.FieldU32("reserved")
 
 							if fn, ok := typeToDecode[typ]; ok {
@@ -163,11 +164,11 @@ func iccProfileDecode(d *decode.D, in interface{}) interface{} {
 						// "All tag data is required to start on a 4-byte boundary (relative to the start of the profile data stream)"
 						// we can't add this at the start of the element as we don't know how big the previous element in the stream
 						// was. instead add alignment after if offset+size does not align and to be sure clamp it if outside buffer.
-						paddingStart := int64(offset) + int64(size)
-						paddingBytes := (4 - (int64(offset)+int64(size))%4) % 4
-						paddingBytes = mathextra.MinInt64(paddingBytes, d.Len()-(paddingStart+paddingBytes))
-						if paddingBytes != 0 {
-							d.RangeFn(paddingStart*8, paddingBytes*8, func(d *decode.D) {
+						alignStart := int64(offset) + int64(size)
+						alignBytes := (4 - (int64(offset)+int64(size))%4) % 4
+						alignBytes = min(d.Len()/8-alignStart, alignBytes)
+						if alignBytes != 0 {
+							d.RangeFn(alignStart*8, alignBytes*8, func(d *decode.D) {
 								d.FieldRawLen("alignment", d.BitsLeft())
 							})
 						}

@@ -1,11 +1,10 @@
 package decode
 
-// TODO: Encoding, u16le, varint etc, encode?
-// TODO: Value/Compound interface? can have per type and save memory
-
 import (
+	"cmp"
 	"errors"
-	"sort"
+	"fmt"
+	"slices"
 
 	"github.com/wader/fq/pkg/bitio"
 	"github.com/wader/fq/pkg/ranges"
@@ -13,22 +12,26 @@ import (
 )
 
 type Compound struct {
-	IsArray  bool
-	Children []*Value
-
+	ByName      map[string]*Value
 	Description string
-	Format      *Format
-	Err         error
+	Children    []*Value
+	IsArray     bool
 }
 
+// TODO: Encoding, u16le, varint etc, encode?
+// TODO: Value/Compound interface? can have per type and save memory
+// TODO: Make some fields optional somehow? map/slice?
 type Value struct {
-	Parent     *Value
-	Name       string
-	V          interface{} // scalar.S or Compound (array/struct)
-	Index      int         // index in parent array/struct
-	Range      ranges.Range
-	RootReader bitio.ReaderAtSeeker
-	IsRoot     bool // TODO: rework?
+	V           any // scalar.S or Compound (array/struct)
+	RootReader  bitio.ReaderAtSeeker
+	Err         error
+	Parent      *Value
+	Format      *Format // TODO: rework
+	Name        string
+	Description string
+	Range       ranges.Range
+	Index       int  // index in parent array/struct
+	IsRoot      bool // TODO: rework?
 }
 
 type WalkFn func(v *Value, rootV *Value, depth int, rootDepth int) error
@@ -147,12 +150,8 @@ func (v *Value) root(findSubRoot bool, findFormatRoot bool) *Value {
 		if findSubRoot && rootV.IsRoot {
 			break
 		}
-		if findFormatRoot {
-			if c, ok := rootV.V.(*Compound); ok {
-				if c.Format != nil {
-					break
-				}
-			}
+		if findFormatRoot && rootV.Format != nil {
+			break
 		}
 
 		rootV = rootV.Parent
@@ -166,12 +165,9 @@ func (v *Value) FormatRoot() *Value { return v.root(true, true) }
 
 func (v *Value) Errors() []error {
 	var errs []error
-	_ = v.WalkPreOrder(func(v *Value, rootV *Value, depth int, rootDepth int) error {
-		switch vv := rootV.V.(type) {
-		case *Compound:
-			if vv.Err != nil {
-				errs = append(errs, vv.Err)
-			}
+	_ = v.WalkPreOrder(func(v *Value, _ *Value, _ int, _ int) error {
+		if v.Err != nil {
+			errs = append(errs, v.Err)
 		}
 		return nil
 	})
@@ -186,12 +182,15 @@ func (v *Value) InnerRange() ranges.Range {
 }
 
 func (v *Value) postProcess() {
-	if err := v.WalkRootPostOrder(func(v *Value, rootV *Value, depth int, rootDepth int) error {
+	if err := v.WalkRootPostOrder(func(v *Value, _ *Value, _ int, _ int) error {
 		switch vv := v.V.(type) {
 		case *Compound:
 			first := true
 			for _, f := range vv.Children {
 				if f.IsRoot {
+					continue
+				}
+				if s, ok := f.V.(scalar.Scalarable); ok && s.ScalarFlags().IsSynthetic() {
 					continue
 				}
 
@@ -203,11 +202,12 @@ func (v *Value) postProcess() {
 				}
 			}
 
-			// TODO: really sort array? if sort it needs to be stable to keep the order
-			// of value with same range start, think null values etc
-			sort.SliceStable(vv.Children, func(i, j int) bool {
-				return (vv.Children)[i].Range.Start < (vv.Children)[j].Range.Start
-			})
+			// sort struct fields and make sure to keep order if range is the same
+			if !vv.IsArray {
+				slices.SortStableFunc(vv.Children, func(a, b *Value) int {
+					return cmp.Compare(a.Range.Start, b.Range.Start)
+				})
+			}
 
 			v.Index = -1
 			if vv.IsArray {
@@ -226,19 +226,68 @@ func (v *Value) postProcess() {
 	}
 }
 
-func (v *Value) TryScalarFn(sms ...scalar.Mapper) error {
+// TODO: rethink this
+func (v *Value) TryUintScalarFn(sms ...scalar.UintMapper) error {
 	var err error
-	sr, ok := v.V.(*scalar.S)
+	sr, ok := v.V.(*scalar.Uint)
 	if !ok {
 		panic("not a scalar value")
 	}
 	s := *sr
 	for _, sm := range sms {
-		s, err = sm.MapScalar(s)
+		s, err = sm.MapUint(s)
 		if err != nil {
 			break
 		}
 	}
 	v.V = &s
 	return err
+}
+
+func (v *Value) TryBitBufScalarFn(sms ...scalar.BitBufMapper) error {
+	var err error
+	sr, ok := v.V.(*scalar.BitBuf)
+	if !ok {
+		panic("not a scalar value")
+	}
+	s := *sr
+	for _, sm := range sms {
+		s, err = sm.MapBitBuf(s)
+		if err != nil {
+			break
+		}
+	}
+	v.V = &s
+	return err
+}
+
+func (v *Value) Remove() error {
+	p := v.Parent
+	if p == nil {
+		return fmt.Errorf("d has no parent")
+	}
+
+	switch fv := p.V.(type) {
+	case *Compound:
+		if !fv.IsArray {
+			if _, ok := fv.ByName[v.Name]; !ok {
+				return fmt.Errorf("d not in parent ByName")
+			}
+			delete(fv.ByName, p.Name)
+		}
+		found := false
+		var cs []*Value
+		for _, c := range fv.Children {
+			if c == v {
+				found = true
+				continue
+			}
+			cs = append(cs, c)
+		}
+		if !found {
+			return fmt.Errorf("d not in parent children")
+		}
+		fv.Children = cs
+	}
+	return nil
 }

@@ -5,6 +5,9 @@ hevc_annexb
 hevc_au
 hevc_dcr
 hevc_nalu
+hevc_pps
+hevc_sps
+hevc_vps
 hex
 hexdump
 null> _is_ide\t
@@ -29,7 +32,7 @@ aa
 ab
 > object> ^D
 null> ^D
-$ fq -i . /test.mp3
+$ fq -i . test.mp3
 mp3> .f\t
 footers
 frames
@@ -42,16 +45,17 @@ _description
 _error
 _format
 _format_root
+_gap
 _index
 _len
 _name
+_out
 _parent
 _path
 _root
 _start
 _stop
 _sym
-_unknown
 mp3> .frames\t
 frames[]
 mp3> .frames[]\t
@@ -65,4 +69,8 @@ color
 colors
 compact
 completion_timeout
+mp3> .frames[0] | repl
+> .frames[0] mp3_frame> .he\t
+header
+> .frames[0] mp3_frame> ^D
 mp3> ^D

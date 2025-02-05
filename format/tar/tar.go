@@ -5,32 +5,36 @@ package tar
 
 import (
 	"bytes"
+	"time"
 
 	"github.com/wader/fq/format"
-	"github.com/wader/fq/format/registry"
 	"github.com/wader/fq/pkg/decode"
+	"github.com/wader/fq/pkg/interp"
 	"github.com/wader/fq/pkg/scalar"
 )
 
-var probeFormat decode.Group
+var probeGroup decode.Group
 
 func init() {
-	registry.MustRegister(decode.Format{
-		Name:        format.TAR,
-		Description: "Tar archive",
-		Groups:      []string{format.PROBE},
-		DecodeFn:    tarDecode,
-		Dependencies: []decode.Dependency{
-			{Names: []string{format.PROBE}, Group: &probeFormat},
-		},
-	})
+	interp.RegisterFormat(
+		format.TAR,
+		&decode.Format{
+			Description: "Tar archive",
+			Groups:      []*decode.Group{format.Probe},
+			DecodeFn:    tarDecode,
+			Dependencies: []decode.Dependency{
+				{Groups: []*decode.Group{format.Probe}, Out: &probeGroup},
+			},
+		})
 }
 
-func tarDecode(d *decode.D, in interface{}) interface{} {
+var unixTimeEpochDate = time.Date(1970, time.January, 1, 0, 0, 0, 0, time.UTC)
+
+func tarDecode(d *decode.D) any {
 	const blockBytes = 512
 	const blockBits = blockBytes * 8
 
-	mapTrimSpaceNull := scalar.Trim(" \x00")
+	mapTrimSpaceNull := scalar.StrActualTrim(" \x00")
 	blockPadding := func(d *decode.D) int64 {
 		return (blockBits - (d.Pos() % blockBits)) % blockBits
 	}
@@ -45,31 +49,34 @@ func tarDecode(d *decode.D, in interface{}) interface{} {
 		for !d.End() {
 			d.FieldStruct("file", func(d *decode.D) {
 				d.FieldUTF8("name", 100, mapTrimSpaceNull)
-				d.FieldUTF8NullFixedLen("mode", 8, scalar.StrUintToSym(8))
-				d.FieldUTF8NullFixedLen("uid", 8, scalar.StrUintToSym(8))
-				d.FieldUTF8NullFixedLen("gid", 8, scalar.StrUintToSym(8))
-				sizeS := d.FieldScalarUTF8NullFixedLen("size", 12, scalar.StrUintToSym(8))
-				if sizeS.Sym == nil {
+				d.FieldUTF8NullFixedLen("mode", 8, scalar.TryStrSymParseUint(8))
+				d.FieldUTF8NullFixedLen("uid", 8, scalar.TryStrSymParseUint(8))
+				d.FieldUTF8NullFixedLen("gid", 8, scalar.TryStrSymParseUint(8))
+				size, sizeOk := d.FieldScalarUTF8NullFixedLen("size", 12, scalar.TryStrSymParseUint(8)).TrySymUint()
+				if !sizeOk {
 					d.Fatalf("could not decode size")
 				}
-				size := int64(sizeS.SymU()) * 8
-				d.FieldUTF8NullFixedLen("mtime", 12, scalar.StrUintToSym(8))
-				d.FieldUTF8NullFixedLen("chksum", 8, scalar.StrUintToSym(8))
+				size *= 8
+				d.FieldUTF8NullFixedLen("mtime", 12, scalar.TryStrSymParseUint(8), scalar.StrFn(func(s scalar.Str) (scalar.Str, error) {
+					// TODO: string might not be a number, move to scalar?
+					if v, ok := s.TrySymUint(); ok {
+						s.Description = unixTimeEpochDate.Add(time.Duration(v) * time.Second).Format(time.RFC3339)
+					}
+					return s, nil
+				}))
+				d.FieldUTF8NullFixedLen("chksum", 8, scalar.TryStrSymParseUint(8))
 				d.FieldUTF8("typeflag", 1, mapTrimSpaceNull)
 				d.FieldUTF8("linkname", 100, mapTrimSpaceNull)
-				d.FieldUTF8("magic", 6, mapTrimSpaceNull, d.AssertStr("ustar"))
-				d.FieldUTF8NullFixedLen("version", 2, scalar.StrUintToSym(8))
+				d.FieldUTF8("magic", 6, mapTrimSpaceNull, d.StrAssert("ustar"))
+				d.FieldUTF8NullFixedLen("version", 2, scalar.TryStrSymParseUint(8))
 				d.FieldUTF8("uname", 32, mapTrimSpaceNull)
 				d.FieldUTF8("gname", 32, mapTrimSpaceNull)
-				d.FieldUTF8NullFixedLen("devmajor", 8, scalar.StrUintToSym(8))
-				d.FieldUTF8NullFixedLen("devminor", 8, scalar.StrUintToSym(8))
+				d.FieldUTF8NullFixedLen("devmajor", 8, scalar.TryStrSymParseUint(8))
+				d.FieldUTF8NullFixedLen("devminor", 8, scalar.TryStrSymParseUint(8))
 				d.FieldUTF8("prefix", 155, mapTrimSpaceNull)
 				d.FieldRawLen("header_block_padding", blockPadding(d), d.BitBufIsZero())
 
-				dv, _, _ := d.TryFieldFormatLen("data", size, probeFormat, nil)
-				if dv == nil {
-					d.FieldRawLen("data", size)
-				}
+				d.FieldFormatOrRawLen("data", int64(size), &probeGroup, format.Probe_In{})
 
 				d.FieldRawLen("data_block_padding", blockPadding(d), d.BitBufIsZero())
 			})

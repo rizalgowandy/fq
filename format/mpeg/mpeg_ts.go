@@ -2,25 +2,26 @@ package mpeg
 
 import (
 	"github.com/wader/fq/format"
-	"github.com/wader/fq/format/registry"
 	"github.com/wader/fq/pkg/decode"
+	"github.com/wader/fq/pkg/interp"
 	"github.com/wader/fq/pkg/scalar"
 )
 
 func init() {
-	registry.MustRegister(decode.Format{
-		Name:        format.MPEG_TS,
-		ProbeOrder:  10, // make sure to be after gif, both start with 0x47
-		Description: "MPEG Transport Stream",
-		Groups:      []string{format.PROBE},
-		DecodeFn:    tsDecode,
-	})
+	interp.RegisterFormat(
+		format.MPEG_TS,
+		&decode.Format{
+			ProbeOrder:  format.ProbeOrderBinFuzzy, // make sure to be after gif, both start with 0x47
+			Description: "MPEG Transport Stream",
+			Groups:      []*decode.Group{format.Probe},
+			DecodeFn:    tsDecode,
+		})
 }
 
 // TODO: ts_packet
 
-func tsDecode(d *decode.D, in interface{}) interface{} {
-	d.FieldU8("sync", d.AssertU(0x47), scalar.Hex)
+func tsDecode(d *decode.D) any {
+	d.FieldU8("sync", d.UintAssert(0x47), scalar.UintHex)
 	d.FieldBool("transport_error_indicator")
 	d.FieldBool("payload_unit_start")
 	d.FieldBool("transport_priority")

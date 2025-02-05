@@ -1,10 +1,13 @@
+/filea:
+aaa
 $ fq -n options
 {
   "addrbase": 16,
   "arg": [],
+  "argdecode": [],
   "argjson": [],
   "array_truncate": 50,
-  "bits_format": "snippet",
+  "bits_format": "string",
   "byte_colors": [
     {
       "ranges": [
@@ -13,7 +16,7 @@ $ fq -n options
           255
         ]
       ],
-      "value": "brightwhite"
+      "value": "default+bold"
     },
     {
       "ranges": [
@@ -34,37 +37,37 @@ $ fq -n options
           13
         ]
       ],
-      "value": "white"
+      "value": "default"
     }
   ],
   "color": false,
   "colors": {
-    "array": "white",
+    "array": "default",
     "dumpaddr": "yellow",
     "dumpheader": "yellow+underline",
     "error": "brightred",
     "false": "yellow",
-    "index": "white",
+    "index": "default",
     "null": "brightblack",
     "number": "cyan",
-    "object": "white",
+    "object": "default",
     "objectkey": "brightblue",
     "prompt_repl_level": "brightblack",
-    "prompt_value": "white",
+    "prompt_value": "default",
     "string": "green",
     "true": "yellow",
-    "value": "white"
+    "value": "default"
   },
   "compact": false,
   "completion_timeout": 10,
-  "decode_file": [],
-  "decode_format": "probe",
+  "decode_group": "probe",
   "decode_progress": false,
   "depth": 0,
   "display_bytes": 16,
   "expr": "options",
   "expr_eval_path": "arg",
   "expr_file": null,
+  "expr_given": true,
   "filenames": [
     null
   ],
@@ -80,10 +83,14 @@ $ fq -n options
   "show_formats": false,
   "show_help": false,
   "sizebase": 10,
+  "skip_gaps": false,
   "slurp": false,
   "string_input": false,
+  "string_truncate": 50,
   "unicode": false,
-  "verbose": false
+  "value_output": false,
+  "verbose": false,
+  "width": 135
 }
 $ fq -o addrbase=10 -n options.addrbase
 10
@@ -119,7 +126,7 @@ $ fq -o compact=true -n options.compact
 true
 $ fq -o compact=aaa -n options.compact
 false
-$ fq -n -o 'decode_file=[["a", "/test.mp3"]]' '$a | format'
+$ fq -n -o 'argdecode=[["a", "test.mp3"]]' '$a | format'
 "mp3"
 $ fq -o decode_progress=false -n options.decode_progress
 false
@@ -139,7 +146,7 @@ $ fq -o expr_file=test.jq -n options.expr_file
 exitcode: 2
 stderr:
 error: test.jq: no such file or directory
-$ fq -o 'filenames=["/test.mp3"]' format
+$ fq -o 'filenames=["test.mp3"]' format
 "mp3"
 $ fq -o 'force=true' -n options.force
 true
@@ -188,7 +195,7 @@ $ fq -n "options | {display_bytes, line_bytes}"
   "display_bytes": 16,
   "line_bytes": 16
 }
-$ _STDOUT_ISTERMINAL= fq -n  "options | {display_bytes, line_bytes}"
+$ _STDOUT_IS_TERMINAL= fq -n  "options | {display_bytes, line_bytes}"
 {
   "display_bytes": 16,
   "line_bytes": 16
@@ -198,10 +205,10 @@ $ _STDOUT_WIDTH=160 _STDOUT_HEIGHT=40 fq -n  "options | {display_bytes, line_byt
   "display_bytes": 20,
   "line_bytes": 20
 }
-$ _STDOUT_ISTERMINAL= _STDOUT_WIDTH=160 _STDOUT_HEIGHT=40 fq -n  "options | {display_bytes, line_bytes}"
+$ _STDOUT_IS_TERMINAL= _STDOUT_WIDTH=160 _STDOUT_HEIGHT=40 fq -n  "options | {display_bytes, line_bytes}"
 {
-  "display_bytes": 16,
-  "line_bytes": 16
+  "display_bytes": 20,
+  "line_bytes": 20
 }
 $ fq -in
 null> options | {display_bytes, line_bytes}
@@ -215,3 +222,9 @@ null> _STDOUT_WIDTH=160 _STDOUT_HEIGHT=40 options | {display_bytes, line_bytes}
   "line_bytes": 20
 }
 null> ^D
+$ fq -n -o from_file=@filea options.from_file
+"aaa\n"
+$ fq -n -o from_file=@does_not_exist options.from_file
+exitcode: 2
+stderr:
+error: -o from_file=@does_not_exist: no such file or directory

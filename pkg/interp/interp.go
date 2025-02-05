@@ -11,75 +11,77 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"io/ioutil"
 	"math/big"
 	"path"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/mitchellh/mapstructure"
 	"github.com/wader/fq/internal/ansi"
-	"github.com/wader/fq/internal/bitioextra"
+	"github.com/wader/fq/internal/bitiox"
 	"github.com/wader/fq/internal/colorjson"
 	"github.com/wader/fq/internal/ctxstack"
-	"github.com/wader/fq/internal/gojqextra"
-	"github.com/wader/fq/internal/ioextra"
-	"github.com/wader/fq/internal/mathextra"
+	"github.com/wader/fq/internal/gojqx"
+	"github.com/wader/fq/internal/iox"
+	"github.com/wader/fq/internal/mapstruct"
+	"github.com/wader/fq/internal/mathx"
 	"github.com/wader/fq/internal/pos"
 	"github.com/wader/fq/pkg/bitio"
 	"github.com/wader/fq/pkg/decode"
-	"github.com/wader/fq/pkg/registry"
 
 	"github.com/wader/gojq"
 )
 
 //go:embed interp.jq
 //go:embed internal.jq
-//go:embed eval.jq
 //go:embed options.jq
-//go:embed ansi.jq
 //go:embed binary.jq
 //go:embed decode.jq
-//go:embed funcs.jq
+//go:embed registry_include.jq
+//go:embed format_decode.jq
+//go:embed format_func.jq
 //go:embed grep.jq
 //go:embed args.jq
+//go:embed eval.jq
 //go:embed query.jq
 //go:embed repl.jq
 //go:embed help.jq
-//go:embed formats.jq
+//go:embed funcs.jq
+//go:embed ansi.jq
+//go:embed init.jq
 var builtinFS embed.FS
 
-var initSource = `include "@builtin/interp";`
-
-var functionRegisterFns []func(i *Interp) []Function
+var initSource = `include "@builtin/init"; .`
 
 func init() {
-	functionRegisterFns = append(functionRegisterFns, func(i *Interp) []Function {
-		return []Function{
-			{"_readline", 0, 1, nil, i._readline},
-			{"_eval", 1, 2, nil, i._eval},
-			{"_stdin", 0, 1, nil, i.makeStdioFn("stdin", i.os.Stdin())},
-			{"_stdout", 0, 0, nil, i.makeStdioFn("stdout", i.os.Stdout())},
-			{"_stderr", 0, 0, nil, i.makeStdioFn("stderr", i.os.Stderr())},
-			{"_extkeys", 0, 0, i._extKeys, nil},
-			{"_exttype", 0, 0, i._extType, nil},
-			{"_global_state", 0, 1, i.makeStateFn(i.state), nil},
-			{"history", 0, 0, i.history, nil},
-			{"_display", 1, 1, nil, i._display},
-			{"_can_display", 0, 0, i._canDisplay, nil},
-			{"_print_color_json", 0, 1, nil, i._printColorJSON},
-			{"_is_completing", 0, 1, i._isCompleting, nil},
-		}
-	})
+	RegisterIter1("_readline", (*Interp)._readline)
+	RegisterIter2("_eval", (*Interp)._eval)
+
+	RegisterIter2("_stdio_read", (*Interp)._stdioRead)
+	RegisterIter1("_stdio_write", (*Interp)._stdioWrite)
+	RegisterFunc1("_stdio_info", (*Interp)._stdioInfo)
+
+	RegisterFunc0("_extkeys", (*Interp)._extKeys)
+	RegisterFunc0("_exttype", (*Interp)._extType)
+
+	RegisterFunc0("_global_state", func(i *Interp, c any) any { return *i.state })
+	RegisterFunc1("_global_state", func(i *Interp, _ any, v any) any { *i.state = v; return v })
+
+	RegisterFunc0("history", (*Interp).history)
+	RegisterIter1("_display", (*Interp)._display)
+	RegisterFunc0("_can_display", (*Interp)._canDisplay)
+	RegisterIter1("_hexdump", (*Interp)._hexdump)
+	RegisterIter1("_print_color_json", (*Interp)._printColorJSON)
+
+	RegisterFunc0("_is_completing", (*Interp)._isCompleting)
 }
 
 type valueError struct {
-	v interface{}
+	v any
 }
 
-func (v valueError) Error() string      { return fmt.Sprintf("error: %v", v.v) }
-func (v valueError) Value() interface{} { return v.v }
+func (v valueError) Error() string { return fmt.Sprintf("error: %v", v.v) }
+func (v valueError) Value() any    { return v.v }
 
 type compileError struct {
 	err      error
@@ -88,8 +90,8 @@ type compileError struct {
 	pos      pos.Pos
 }
 
-func (ce compileError) Value() interface{} {
-	return map[string]interface{}{
+func (ce compileError) Value() any {
+	return map[string]any{
 		"error":    ce.err.Error(),
 		"what":     ce.what,
 		"filename": ce.filename,
@@ -113,11 +115,6 @@ type Exiter interface {
 	ExitCode() int
 }
 
-// gojq halt_error uses this
-type IsEmptyErrorer interface {
-	IsEmptyError() bool
-}
-
 type Terminal interface {
 	Size() (int, int)
 	IsTerminal() bool
@@ -134,13 +131,16 @@ type Output interface {
 }
 
 type Platform struct {
-	OS   string
-	Arch string
+	OS        string
+	Arch      string
+	GoVersion string
 }
+
+type CompleteFn func(line string, pos int) (newLine []string, shared int)
 
 type ReadlineOpts struct {
 	Prompt     string
-	CompleteFn func(line string, pos int) (newLine []string, shared int)
+	CompleteFn CompleteFn
 }
 
 type OS interface {
@@ -164,7 +164,7 @@ type FixedFileInfo struct {
 	FMode    fs.FileMode
 	FModTime time.Time
 	FIsDir   bool
-	FSys     interface{}
+	FSys     any
 }
 
 func (ffi FixedFileInfo) Name() string       { return ffi.FName }
@@ -172,7 +172,7 @@ func (ffi FixedFileInfo) Size() int64        { return ffi.FSize }
 func (ffi FixedFileInfo) Mode() fs.FileMode  { return ffi.FMode }
 func (ffi FixedFileInfo) ModTime() time.Time { return ffi.FModTime }
 func (ffi FixedFileInfo) IsDir() bool        { return ffi.FIsDir }
-func (ffi FixedFileInfo) Sys() interface{}   { return ffi.FSys }
+func (ffi FixedFileInfo) Sys() any           { return ffi.FSys }
 
 type FileReader struct {
 	R        io.Reader
@@ -191,23 +191,24 @@ type Value interface {
 }
 
 type Display interface {
-	Display(w io.Writer, opts Options) error
+	Display(w io.Writer, opts *Options) error
 }
 
 type JQValueEx interface {
-	JQValueToGoJQEx(optsFn func() Options) interface{}
+	gojq.JQValue
+	JQValueToGoJQEx(optsFn func() (*Options, error)) any
 }
 
-func valuePath(v *decode.Value) []interface{} {
-	var parts []interface{}
+func valuePath(v *decode.Value) []any {
+	var parts []any
 
 	for v.Parent != nil {
 		switch vv := v.Parent.V.(type) {
 		case *decode.Compound:
 			if vv.IsArray {
-				parts = append([]interface{}{v.Index}, parts...)
+				parts = append([]any{v.Index}, parts...)
 			} else {
-				parts = append([]interface{}{v.Name}, parts...)
+				parts = append([]any{v.Name}, parts...)
 			}
 		}
 		v = v.Parent
@@ -216,29 +217,28 @@ func valuePath(v *decode.Value) []interface{} {
 	return parts
 }
 
-func valuePathDecorated(v *decode.Value, d Decorator) string {
-	var parts []string
+func valuePathExprDecorated(v *decode.Value, d Decorator) string {
+	parts := []string{"."}
 
-	for _, p := range valuePath(v) {
+	for i, p := range valuePath(v) {
 		switch p := p.(type) {
 		case string:
-			parts = append(parts, ".", d.ObjectKey.Wrap(p))
+			if i > 0 {
+				parts = append(parts, ".")
+			}
+			parts = append(parts, d.ObjectKey.Wrap(p))
 		case int:
 			indexStr := strconv.Itoa(p)
 			parts = append(parts, fmt.Sprintf("%s%s%s", d.Index.F("["), d.Number.F(indexStr), d.Index.F("]")))
 		}
 	}
 
-	if len(parts) == 0 {
-		return "."
-	}
-
 	return strings.Join(parts, "")
 }
 
-type iterFn func() (interface{}, bool)
+type iterFn func() (any, bool)
 
-func (i iterFn) Next() (interface{}, bool) { return i() }
+func (i iterFn) Next() (any, bool) { return i() }
 
 type loadModule struct {
 	init func() ([]*gojq.Query, error)
@@ -248,7 +248,7 @@ type loadModule struct {
 func (l loadModule) LoadInitModules() ([]*gojq.Query, error)     { return l.init() }
 func (l loadModule) LoadModule(name string) (*gojq.Query, error) { return l.load(name) }
 
-func toString(v interface{}) (string, error) {
+func toString(v any) (string, error) {
 	switch v := v.(type) {
 	case string:
 		return v, nil
@@ -264,7 +264,7 @@ func toString(v interface{}) (string, error) {
 	}
 }
 
-func toBigInt(v interface{}) (*big.Int, error) {
+func toBigInt(v any) (*big.Int, error) {
 	switch v := v.(type) {
 	case int:
 		return new(big.Int).SetInt64(int64(v)), nil
@@ -277,15 +277,15 @@ func toBigInt(v interface{}) (*big.Int, error) {
 	}
 }
 
-func toBytes(v interface{}) ([]byte, error) {
+func toBytes(v any) ([]byte, error) {
 	switch v := v.(type) {
 	default:
-		br, err := toBitReader(v)
+		br, err := ToBitReader(v)
 		if err != nil {
 			return nil, fmt.Errorf("value is not bytes")
 		}
 		buf := &bytes.Buffer{}
-		if _, err := bitioextra.CopyBits(buf, br); err != nil {
+		if _, err := bitiox.CopyBits(buf, br); err != nil {
 			return nil, err
 		}
 
@@ -296,8 +296,9 @@ func toBytes(v interface{}) ([]byte, error) {
 func queryErrorPosition(expr string, v error) pos.Pos {
 	var offset int
 
-	if tokIf, ok := v.(interface{ Token() (string, int) }); ok { //nolint:errorlint
-		_, offset = tokIf.Token()
+	var e *gojq.ParseError
+	if errors.As(v, &e) {
+		offset = e.Offset
 	}
 	if offset >= 0 {
 		return pos.NewFromOffset(expr, offset)
@@ -307,15 +308,7 @@ func queryErrorPosition(expr string, v error) pos.Pos {
 
 type Variable struct {
 	Name  string
-	Value interface{}
-}
-
-type Function struct {
-	Name     string
-	MinArity int
-	MaxArity int
-	Fn       func(interface{}, []interface{}) interface{}
-	IterFn   func(interface{}, []interface{}) gojq.Iter
+	Value any
 }
 
 type RunMode int
@@ -326,32 +319,34 @@ const (
 	CompletionMode
 )
 
-type evalInstance struct {
-	ctx          context.Context
-	output       io.Writer
-	isCompleting bool
-	includeSeen  map[string]struct{}
+type EvalInstance struct {
+	Ctx          context.Context
+	Output       io.Writer
+	IsCompleting bool
+
+	includeSeen map[string]struct{}
 }
 
 type Interp struct {
-	registry       *registry.Registry
-	os             OS
+	Registry *Registry
+	OS       OS
+
 	initQuery      *gojq.Query
 	includeCache   map[string]*gojq.Query
 	interruptStack *ctxstack.Stack
 	// global state, is ref as Interp is cloned per eval
-	state *interface{}
+	state *any
 
 	// new for each eval, other values are copied by value
-	evalInstance evalInstance
+	EvalInstance EvalInstance
 }
 
-func New(os OS, registry *registry.Registry) (*Interp, error) {
+func New(os OS, registry *Registry) (*Interp, error) {
 	var err error
 
 	i := &Interp{
-		os:       os,
-		registry: registry,
+		OS:       os,
+		Registry: registry,
 	}
 
 	i.includeCache = map[string]*gojq.Query{}
@@ -368,7 +363,7 @@ func New(os OS, registry *registry.Registry) (*Interp, error) {
 			return
 		}
 	})
-	i.state = new(interface{})
+	i.state = new(any)
 
 	return i, nil
 }
@@ -379,22 +374,23 @@ func (i *Interp) Stop() {
 }
 
 func (i *Interp) Main(ctx context.Context, output Output, versionStr string) error {
-	var args []interface{}
-	for _, a := range i.os.Args() {
+	var args []any
+	for _, a := range i.OS.Args() {
 		args = append(args, a)
 	}
 
-	platform := i.os.Platform()
-	input := map[string]interface{}{
-		"args":    args,
-		"version": versionStr,
-		"os":      platform.OS,
-		"arch":    platform.Arch,
+	platform := i.OS.Platform()
+	input := map[string]any{
+		"args":       args,
+		"version":    versionStr,
+		"os":         platform.OS,
+		"arch":       platform.Arch,
+		"go_version": platform.GoVersion,
 	}
 
 	iter, err := i.EvalFunc(ctx, input, "_main", nil, EvalOpts{output: output})
 	if err != nil {
-		fmt.Fprintln(i.os.Stderr(), err)
+		fmt.Fprintln(i.OS.Stderr(), err)
 		return err
 	}
 	for {
@@ -405,49 +401,65 @@ func (i *Interp) Main(ctx context.Context, output Output, versionStr string) err
 
 		switch v := v.(type) {
 		case error:
-			if emptyErr, ok := v.(IsEmptyErrorer); ok && emptyErr.IsEmptyError() { //nolint:errorlint
-				// no output
+			var haltErr *gojq.HaltError
+			if errors.As(v, &haltErr) {
+				if haltErrV := haltErr.Value(); haltErrV != nil {
+					if str, ok := haltErrV.(string); ok {
+						if _, err := i.OS.Stderr().Write([]byte(str)); err != nil {
+							return err
+						}
+					} else {
+						bs, _ := gojq.Marshal(haltErrV)
+						if _, err := i.OS.Stderr().Write(bs); err != nil {
+							return err
+						}
+						if _, err := i.OS.Stderr().Write([]byte{'\n'}); err != nil {
+							return err
+						}
+					}
+				}
+
+				return haltErr
 			} else if errors.Is(v, context.Canceled) {
 				// ignore context cancel here for now, which means user somehow interrupted the interpreter
 				// TODO: handle this inside interp.jq instead but then we probably have to do nested
 				// eval and or also use different contexts for the interpreter and reading/decoding
 			} else {
-				fmt.Fprintln(i.os.Stderr(), v)
+				fmt.Fprintln(i.OS.Stderr(), v)
 			}
 			return v
-		case [2]interface{}:
-			fmt.Fprintln(i.os.Stderr(), v[:]...)
 		default:
 			// TODO: can this happen?
-			fmt.Fprintln(i.os.Stderr(), v)
+			fmt.Fprintln(i.OS.Stderr(), v)
 		}
 	}
 
 	return nil
 }
 
-func (i *Interp) _readline(c interface{}, a []interface{}) gojq.Iter {
-	if i.evalInstance.isCompleting {
+type completionResult struct {
+	Names  []string
+	Prefix string
+}
+
+type readlineOpts struct {
+	Prompt   string
+	Complete string
+	Timeout  float64
+}
+
+func (i *Interp) _readline(c any, opts readlineOpts) gojq.Iter {
+	if i.EvalInstance.IsCompleting {
 		return gojq.NewIter()
 	}
 
-	var opts struct {
-		Promopt  string  `mapstructure:"prompt"`
-		Complete string  `mapstructure:"complete"`
-		Timeout  float64 `mapstructure:"timeout"`
-	}
-
-	if len(a) > 0 {
-		_ = mapstructure.Decode(a[0], &opts)
-	}
-
-	expr, err := i.os.Readline(ReadlineOpts{
-		Prompt: opts.Promopt,
+	expr, err := i.OS.Readline(ReadlineOpts{
+		Prompt: opts.Prompt,
 		CompleteFn: func(line string, pos int) (newLine []string, shared int) {
-			completeCtx := i.evalInstance.ctx
+			completeCtx := i.EvalInstance.Ctx
 			if opts.Timeout > 0 {
 				var completeCtxCancelFn context.CancelFunc
-				completeCtx, completeCtxCancelFn = context.WithTimeout(i.evalInstance.ctx, time.Duration(opts.Timeout*float64(time.Second)))
+				completeCtx, completeCtxCancelFn = context.WithTimeout(i.EvalInstance.Ctx, time.Duration(opts.Timeout*float64(time.Second)))
 				defer completeCtxCancelFn()
 			}
 
@@ -457,9 +469,9 @@ func (i *Interp) _readline(c interface{}, a []interface{}) gojq.Iter {
 					completeCtx,
 					c,
 					opts.Complete,
-					[]interface{}{line, pos},
+					[]any{line, pos},
 					EvalOpts{
-						output:       ioextra.DiscardCtxWriter{Ctx: completeCtx},
+						output:       iox.DiscardCtxWriter{Ctx: completeCtx},
 						isCompleting: true,
 					},
 				)
@@ -475,20 +487,14 @@ func (i *Interp) _readline(c interface{}, a []interface{}) gojq.Iter {
 				}
 
 				// {abc: 123, abd: 123} | complete(".ab"; 3) will return {prefix: "ab", names: ["abc", "abd"]}
-
-				var result struct {
-					Names  []string `mapstructure:"names"`
-					Prefix string   `mapstructure:"prefix"`
+				r, ok := gojqx.CastFn[completionResult](v, mapstruct.ToStruct)
+				if !ok {
+					return nil, pos, fmt.Errorf("completion result not a map")
 				}
 
-				_ = mapstructure.Decode(v, &result)
-				if len(result.Names) == 0 {
-					return nil, pos, nil
-				}
+				sharedLen := len(r.Prefix)
 
-				sharedLen := len(result.Prefix)
-
-				return result.Names, sharedLen, nil
+				return r.Names, sharedLen, nil
 			}()
 
 			// TODO: how to report err?
@@ -509,23 +515,16 @@ func (i *Interp) _readline(c interface{}, a []interface{}) gojq.Iter {
 	return gojq.NewIter(expr)
 }
 
-func (i *Interp) _eval(c interface{}, a []interface{}) gojq.Iter {
-	var err error
-	expr, err := toString(a[0])
-	if err != nil {
-		return gojq.NewIter(fmt.Errorf("expr: %w", err))
-	}
-	var filenameHint string
-	if len(a) >= 2 {
-		filenameHint, err = toString(a[1])
-		if err != nil {
-			return gojq.NewIter(fmt.Errorf("filename hint: %w", err))
-		}
-	}
+type evalOpts struct {
+	Filename string
+}
 
-	iter, err := i.Eval(i.evalInstance.ctx, c, expr, EvalOpts{
-		filename: filenameHint,
-		output:   i.evalInstance.output,
+func (i *Interp) _eval(c any, expr string, opts evalOpts) gojq.Iter {
+	var err error
+
+	iter, err := i.Eval(i.EvalInstance.Ctx, c, expr, EvalOpts{
+		filename: opts.Filename,
+		output:   i.EvalInstance.Output,
 	})
 	if err != nil {
 		return gojq.NewIter(err)
@@ -534,9 +533,9 @@ func (i *Interp) _eval(c interface{}, a []interface{}) gojq.Iter {
 	return iter
 }
 
-func (i *Interp) _extKeys(c interface{}, a []interface{}) interface{} {
+func (i *Interp) _extKeys(c any) any {
 	if v, ok := c.(Value); ok {
-		var vs []interface{}
+		var vs []any
 		for _, s := range v.ExtKeys() {
 			vs = append(vs, s)
 		}
@@ -545,94 +544,113 @@ func (i *Interp) _extKeys(c interface{}, a []interface{}) interface{} {
 	return nil
 }
 
-func (i *Interp) _extType(c interface{}, a []interface{}) interface{} {
+func (i *Interp) _extType(c any) any {
 	if v, ok := c.(Value); ok {
 		return v.ExtType()
 	}
-	return gojqextra.Typeof(c)
+	return gojq.TypeOf(c)
 }
 
-func (i *Interp) makeStateFn(state *interface{}) func(c interface{}, a []interface{}) interface{} {
-	return func(c interface{}, a []interface{}) interface{} {
-		if len(a) > 0 {
-			*state = a[0]
-		}
-		return *state
+func (i *Interp) _stdioFdName(s string) (any, error) {
+	switch s {
+	case "stdin":
+		return i.OS.Stdin(), nil
+	case "stdout":
+		return i.OS.Stdout(), nil
+	case "stderr":
+		return i.OS.Stderr(), nil
+	default:
+		return nil, fmt.Errorf("unknown fd %s", s)
 	}
 }
 
-func (i *Interp) makeStdioFn(name string, t Terminal) func(c interface{}, a []interface{}) gojq.Iter {
-	return func(c interface{}, a []interface{}) gojq.Iter {
-		switch {
-		case len(a) == 1:
-			if i.evalInstance.isCompleting {
-				return gojq.NewIter("")
-			}
-
-			r, ok := t.(io.Reader)
-			if !ok {
-				return gojq.NewIter(fmt.Errorf("%s is not readable", name))
-			}
-			l, ok := gojqextra.ToInt(a[0])
-			if !ok {
-				return gojq.NewIter(gojqextra.FuncTypeError{Name: name, V: a[0]})
-			}
-
-			buf := make([]byte, l)
-			n, err := io.ReadFull(r, buf)
-			s := string(buf[0:n])
-
-			vs := []interface{}{s}
-			switch {
-			case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
-				vs = append(vs, valueError{"eof"})
-			default:
-				vs = append(vs, err)
-			}
-
-			return gojq.NewIter(vs...)
-		case c == nil:
-			w, h := t.Size()
-			return gojq.NewIter(map[string]interface{}{
-				"is_terminal": t.IsTerminal(),
-				"width":       w,
-				"height":      h,
-			})
-		default:
-			if i.evalInstance.isCompleting {
-				return gojq.NewIter()
-			}
-
-			w, ok := t.(io.Writer)
-			if !ok {
-				return gojq.NewIter(fmt.Errorf("%v: it not writeable", c))
-			}
-			if _, err := fmt.Fprint(w, c); err != nil {
-				return gojq.NewIter(err)
-			}
-			return gojq.NewIter()
-		}
+func (i *Interp) _stdioRead(c any, fdName string, l int) gojq.Iter {
+	fd, err := i._stdioFdName(fdName)
+	if err != nil {
+		return gojq.NewIter(err)
 	}
+	r, ok := fd.(io.Reader)
+	if !ok {
+		return gojq.NewIter(fmt.Errorf("%s is not a writeable", fdName))
+	}
+
+	if i.EvalInstance.IsCompleting {
+		return gojq.NewIter("")
+	}
+
+	buf := make([]byte, l)
+	n, err := io.ReadFull(r, buf)
+	s := string(buf[0:n])
+
+	vs := []any{s}
+	switch {
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		vs = append(vs, valueError{"eof"})
+	default:
+		vs = append(vs, err)
+	}
+
+	return gojq.NewIter(vs...)
 }
 
-func (i *Interp) history(c interface{}, a []interface{}) interface{} {
-	hs, err := i.os.History()
+func (i *Interp) _stdioWrite(c any, fdName string) gojq.Iter {
+	fd, err := i._stdioFdName(fdName)
+	if err != nil {
+		return gojq.NewIter(err)
+	}
+	w, ok := fd.(io.Writer)
+	if !ok {
+		return gojq.NewIter(fmt.Errorf("%s is not a writeable", fdName))
+	}
+	if i.EvalInstance.IsCompleting {
+		return gojq.NewIter()
+	}
+
+	if _, err := fmt.Fprint(w, c); err != nil {
+		return gojq.NewIter(err)
+	}
+	return gojq.NewIter()
+}
+
+func (i *Interp) _stdioInfo(c any, fdName string) any {
+	fd, err := i._stdioFdName(fdName)
 	if err != nil {
 		return err
 	}
-	var vs []interface{}
+	t, ok := fd.(Terminal)
+	if !ok {
+		return fmt.Errorf("%s is not a terminal", fdName)
+	}
+
+	w, h := t.Size()
+	return map[string]any{
+		"is_terminal": t.IsTerminal(),
+		"width":       w,
+		"height":      h,
+	}
+}
+
+func (i *Interp) history(c any) any {
+	hs, err := i.OS.History()
+	if err != nil {
+		return err
+	}
+	var vs []any
 	for _, s := range hs {
 		vs = append(vs, s)
 	}
 	return vs
 }
 
-func (i *Interp) _display(c interface{}, a []interface{}) gojq.Iter {
-	opts := i.Options(a[0])
+func (i *Interp) _display(c any, v any) gojq.Iter {
+	opts, err := OptionsFromValue(v)
+	if err != nil {
+		return gojq.NewIter(err)
+	}
 
 	switch v := c.(type) {
 	case Display:
-		if err := v.Display(i.evalInstance.output, opts); err != nil {
+		if err := v.Display(i.EvalInstance.Output, opts); err != nil {
 			return gojq.NewIter(err)
 		}
 		return gojq.NewIter()
@@ -641,27 +659,66 @@ func (i *Interp) _display(c interface{}, a []interface{}) gojq.Iter {
 	}
 }
 
-func (i *Interp) _canDisplay(c interface{}, a []interface{}) interface{} {
+func (i *Interp) _canDisplay(c any) any {
 	_, ok := c.(Display)
 	return ok
 }
 
-func (i *Interp) _printColorJSON(c interface{}, a []interface{}) gojq.Iter {
-	opts := i.Options(a[0])
-
-	cj, err := i.NewColorJSON(opts)
+func (i *Interp) _hexdump(c any, v any) gojq.Iter {
+	opts, err := OptionsFromValue(v)
 	if err != nil {
 		return gojq.NewIter(err)
 	}
-	if err := cj.Marshal(c, i.evalInstance.output); err != nil {
+
+	bv, err := toBinary(c)
+	if err != nil {
+		return gojq.NewIter(err)
+	}
+	if err := hexdump(i.EvalInstance.Output, bv, opts); err != nil {
 		return gojq.NewIter(err)
 	}
 
 	return gojq.NewIter()
 }
 
-func (i *Interp) _isCompleting(c interface{}, a []interface{}) interface{} {
-	return i.evalInstance.isCompleting
+func (i *Interp) _printColorJSON(c any, v any) gojq.Iter {
+	opts, err := OptionsFromValue(v)
+	if err != nil {
+		return gojq.NewIter(err)
+	}
+
+	indent := 2
+	if opts.Compact {
+		indent = 0
+	}
+
+	cj := colorjson.NewEncoder(colorjson.Options{
+		Color:  opts.Color,
+		Tab:    false,
+		Indent: indent,
+		// uses a function to cache OptionsFromValue
+		ValueFn: func(v any) (any, error) { return toValue(func() (*Options, error) { return opts, nil }, v) },
+		Colors: colorjson.Colors{
+			Reset:     []byte(ansi.Reset.SetString),
+			Null:      []byte(opts.Decorator.Null.SetString),
+			False:     []byte(opts.Decorator.False.SetString),
+			True:      []byte(opts.Decorator.True.SetString),
+			Number:    []byte(opts.Decorator.Number.SetString),
+			String:    []byte(opts.Decorator.String.SetString),
+			ObjectKey: []byte(opts.Decorator.ObjectKey.SetString),
+			Array:     []byte(opts.Decorator.Array.SetString),
+			Object:    []byte(opts.Decorator.Object.SetString),
+		},
+	})
+	if err := cj.Marshal(c, i.EvalInstance.Output); err != nil {
+		return gojq.NewIter(err)
+	}
+
+	return gojq.NewIter()
+}
+
+func (i *Interp) _isCompleting(c any) any {
+	return i.EvalInstance.IsCompleting
 }
 
 type pathResolver struct {
@@ -670,7 +727,7 @@ type pathResolver struct {
 }
 
 func (i *Interp) lookupPathResolver(filename string) (pathResolver, error) {
-	configDir, err := i.os.ConfigDir()
+	configDir, err := i.OS.ConfigDir()
 	if err != nil {
 		return pathResolver{}, err
 	}
@@ -686,21 +743,21 @@ func (i *Interp) lookupPathResolver(filename string) (pathResolver, error) {
 		{
 			"@config/", func(filename string) (io.ReadCloser, string, error) {
 				p := path.Join(configDir, filename)
-				f, err := i.os.FS().Open(p)
+				f, err := i.OS.FS().Open(p)
 				return f, p, err
 			},
 		},
 		{
 			"", func(filename string) (io.ReadCloser, string, error) {
 				if path.IsAbs(filename) {
-					f, err := i.os.FS().Open(filename)
+					f, err := i.OS.FS().Open(filename)
 					return f, filename, err
 				}
 
 				// TODO: jq $ORIGIN
 				for _, includePath := range append([]string{"./"}, i.includePaths()...) {
 					p := path.Join(includePath, filename)
-					if f, err := i.os.FS().Open(path.Join(includePath, filename)); err == nil {
+					if f, err := i.OS.FS().Open(path.Join(includePath, filename)); err == nil {
 						return f, p, nil
 					}
 				}
@@ -723,7 +780,7 @@ type EvalOpts struct {
 	isCompleting bool
 }
 
-func (i *Interp) Eval(ctx context.Context, c interface{}, expr string, opts EvalOpts) (gojq.Iter, error) {
+func (i *Interp) Eval(ctx context.Context, c any, expr string, opts EvalOpts) (gojq.Iter, error) {
 	gq, err := gojq.Parse(expr)
 	if err != nil {
 		p := queryErrorPosition(expr, err)
@@ -738,32 +795,32 @@ func (i *Interp) Eval(ctx context.Context, c interface{}, expr string, opts Eval
 	// make copy of interp and give it its own eval context
 	ci := *i
 	ni := &ci
-	ni.evalInstance = evalInstance{
+	ni.EvalInstance = EvalInstance{
 		includeSeen: map[string]struct{}{},
 	}
 
 	var variableNames []string
-	var variableValues []interface{}
+	var variableValues []any
 	for k, v := range i.slurps() {
 		variableNames = append(variableNames, "$"+k)
 		variableValues = append(variableValues, v)
 	}
 
 	var funcCompilerOpts []gojq.CompilerOption
-	for _, frFn := range functionRegisterFns {
-		for _, f := range frFn(ni) {
-			if f.IterFn != nil {
-				funcCompilerOpts = append(funcCompilerOpts,
-					gojq.WithIterFunction(f.Name, f.MinArity, f.MaxArity, f.IterFn))
-			} else {
-				funcCompilerOpts = append(funcCompilerOpts,
-					gojq.WithFunction(f.Name, f.MinArity, f.MaxArity, f.Fn))
-			}
+
+	for _, fn := range i.Registry.EnvFuncFns {
+		f := fn(ni)
+		if f.IterFn != nil {
+			funcCompilerOpts = append(funcCompilerOpts,
+				gojq.WithIterFunction(f.Name, f.MinArity, f.MaxArity, f.IterFn))
+		} else {
+			funcCompilerOpts = append(funcCompilerOpts,
+				gojq.WithFunction(f.Name, f.MinArity, f.MaxArity, f.FuncFn))
 		}
 	}
 
 	compilerOpts := append([]gojq.CompilerOption{}, funcCompilerOpts...)
-	compilerOpts = append(compilerOpts, gojq.WithEnvironLoader(ni.os.Environ))
+	compilerOpts = append(compilerOpts, gojq.WithEnvironLoader(ni.OS.Environ))
 	compilerOpts = append(compilerOpts, gojq.WithVariables(variableNames))
 	compilerOpts = append(compilerOpts, gojq.WithModuleLoader(loadModule{
 		init: func() ([]*gojq.Query, error) {
@@ -791,10 +848,10 @@ func (i *Interp) Eval(ctx context.Context, c interface{}, expr string, opts Eval
 			}
 
 			// skip if this eval instance has already included the file
-			if _, ok := ni.evalInstance.includeSeen[filename]; ok {
+			if _, ok := ni.EvalInstance.includeSeen[filename]; ok {
 				return &gojq.Query{Term: &gojq.Term{Type: gojq.TermTypeIdentity}}, nil
 			}
-			ni.evalInstance.includeSeen[filename] = struct{}{}
+			ni.EvalInstance.includeSeen[filename] = struct{}{}
 
 			// return cached version if file has already been parsed
 			if q, ok := ni.includeCache[filename]; ok {
@@ -827,15 +884,14 @@ func (i *Interp) Eval(ctx context.Context, c interface{}, expr string, opts Eval
 					pos:      p,
 				}
 			}
-
-			// not identity body means it returns something, threat as dynamic include
-			if q.Term.Type != gojq.TermTypeIdentity {
+			// has some root expression, threat as dynamic include
+			if q.Term != nil || q.Op != gojq.Operator(0) {
 				gc, err := gojq.Compile(q, funcCompilerOpts...)
 				if err != nil {
 					return nil, err
 				}
 				iter := gc.RunWithContext(context.Background(), nil)
-				var vs []interface{}
+				var vs []any
 				for {
 					v, ok := iter.Next()
 					if !ok {
@@ -858,7 +914,7 @@ func (i *Interp) Eval(ctx context.Context, c interface{}, expr string, opts Eval
 					p := queryErrorPosition(s, err)
 					return nil, compileError{
 						err:      err,
-						what:     "parse",
+						what:     "dynamic include parse",
 						filename: filenamePart,
 						pos:      p,
 					}
@@ -903,17 +959,17 @@ func (i *Interp) Eval(ctx context.Context, c interface{}, expr string, opts Eval
 
 	output := opts.output
 	if opts.output == nil {
-		output = ioutil.Discard
+		output = io.Discard
 	}
 
 	runCtx, runCtxCancelFn := i.interruptStack.Push(ctx)
-	ni.evalInstance.ctx = runCtx
-	ni.evalInstance.output = ioextra.CtxWriter{Writer: output, Ctx: runCtx}
+	ni.EvalInstance.Ctx = runCtx
+	ni.EvalInstance.Output = iox.CtxWriter{Writer: output, Ctx: runCtx}
 	// inherit or maybe set
-	ni.evalInstance.isCompleting = i.evalInstance.isCompleting || opts.isCompleting
+	ni.EvalInstance.IsCompleting = i.EvalInstance.IsCompleting || opts.isCompleting
 	iter := gc.RunWithContext(runCtx, c, variableValues...)
 
-	iterWrapper := iterFn(func() (interface{}, bool) {
+	iterWrapper := iterFn(func() (any, bool) {
 		v, ok := iter.Next()
 		// gojq ctx cancel will not return ok=false, just cancelled error
 		if !ok {
@@ -927,7 +983,7 @@ func (i *Interp) Eval(ctx context.Context, c interface{}, expr string, opts Eval
 	return iterWrapper, nil
 }
 
-func (i *Interp) EvalFunc(ctx context.Context, c interface{}, name string, args []interface{}, opts EvalOpts) (gojq.Iter, error) {
+func (i *Interp) EvalFunc(ctx context.Context, c any, name string, args []any, opts EvalOpts) (gojq.Iter, error) {
 	var argsExpr []string
 	for i := range args {
 		argsExpr = append(argsExpr, fmt.Sprintf("$_args[%d]", i))
@@ -937,7 +993,7 @@ func (i *Interp) EvalFunc(ctx context.Context, c interface{}, name string, args 
 		argExpr = "(" + strings.Join(argsExpr, ";") + ")"
 	}
 
-	trampolineInput := map[string]interface{}{
+	trampolineInput := map[string]any{
 		"input": c,
 		"args":  args,
 	}
@@ -951,13 +1007,13 @@ func (i *Interp) EvalFunc(ctx context.Context, c interface{}, name string, args 
 	return iter, nil
 }
 
-func (i *Interp) EvalFuncValues(ctx context.Context, c interface{}, name string, args []interface{}, opts EvalOpts) ([]interface{}, error) {
+func (i *Interp) EvalFuncValues(ctx context.Context, c any, name string, args []any, opts EvalOpts) ([]any, error) {
 	iter, err := i.EvalFunc(ctx, c, name, args, opts)
 	if err != nil {
 		return nil, err
 	}
 
-	var vs []interface{}
+	var vs []any
 	for {
 		v, ok := iter.Next()
 		if !ok {
@@ -970,95 +1026,138 @@ func (i *Interp) EvalFuncValues(ctx context.Context, c interface{}, name string,
 }
 
 type Options struct {
-	Depth          int               `mapstructure:"depth"`
-	ArrayTruncate  int               `mapstructure:"array_truncate"`
-	Verbose        bool              `mapstructure:"verbose"`
-	DecodeProgress bool              `mapstructure:"decode_progress"`
-	Color          bool              `mapstructure:"color"`
-	Colors         map[string]string `mapstructure:"colors"`
+	Depth          int
+	ArrayTruncate  int
+	StringTruncate int
+	Verbose        bool
+	Width          int
+	DecodeProgress bool
+	Color          bool
+	Colors         map[string]string
 	ByteColors     []struct {
-		Ranges [][2]int `mapstructure:"ranges"`
-		Value  string   `mapstructure:"value"`
-	} `mapstructure:"byte_colors"`
-	Unicode      bool   `mapstructure:"unicode"`
-	RawOutput    bool   `mapstructure:"raw_output"`
-	REPL         bool   `mapstructure:"repl"`
-	RawString    bool   `mapstructure:"raw_string"`
-	JoinString   string `mapstructure:"join_string"`
-	Compact      bool   `mapstructure:"compact"`
-	BitsFormat   string `mapstructure:"bits_format"`
-	LineBytes    int    `mapstructure:"line_bytes"`
-	DisplayBytes int    `mapstructure:"display_bytes"`
-	AddrBase     int    `mapstructure:"addrbase"`
-	SizeBase     int    `mapstructure:"sizebase"`
+		Ranges [][2]int
+		Value  string
+	}
+	Unicode      bool
+	RawOutput    bool
+	REPL         bool
+	RawString    bool
+	JoinString   string
+	Compact      bool
+	BitsFormat   string
+	LineBytes    int
+	DisplayBytes int
+	Addrbase     int
+	Sizebase     int
+	SkipGaps     bool
 
 	Decorator    Decorator
-	BitsFormatFn func(br bitio.ReaderAtSeeker) (interface{}, error)
+	BitsFormatFn func(br bitio.ReaderAtSeeker) (any, error)
 }
 
-func bitsFormatFnFromOptions(opts Options) func(br bitio.ReaderAtSeeker) (interface{}, error) {
+func OptionsFromValue(v any) (*Options, error) {
+	var opts Options
+	_ = mapstruct.ToStruct(v, &opts)
+	opts.ArrayTruncate = max(0, opts.ArrayTruncate)
+	opts.StringTruncate = max(0, opts.StringTruncate)
+	opts.Depth = max(0, opts.Depth)
+	opts.Addrbase = mathx.Clamp(2, 36, opts.Addrbase)
+	opts.Sizebase = mathx.Clamp(2, 36, opts.Sizebase)
+	opts.LineBytes = max(1, opts.LineBytes)
+	opts.DisplayBytes = max(0, opts.DisplayBytes)
+	opts.Decorator = decoratorFromOptions(opts)
+	if fn, err := bitsFormatFnFromOptions(opts); err != nil {
+		return nil, err
+	} else {
+		opts.BitsFormatFn = fn
+	}
+
+	return &opts, nil
+}
+
+func bitsFormatFnFromOptions(opts Options) (func(br bitio.ReaderAtSeeker) (any, error), error) {
 	switch opts.BitsFormat {
 	case "md5":
-		return func(br bitio.ReaderAtSeeker) (interface{}, error) {
+		return func(br bitio.ReaderAtSeeker) (any, error) {
 			d := md5.New()
-			if _, err := bitioextra.CopyBits(d, br); err != nil {
+			if _, err := bitiox.CopyBits(d, br); err != nil {
 				return "", err
 			}
 			return hex.EncodeToString(d.Sum(nil)), nil
-		}
+		}, nil
+	case "hex":
+		return func(br bitio.ReaderAtSeeker) (any, error) {
+			b := &bytes.Buffer{}
+			e := hex.NewEncoder(b)
+			if _, err := bitiox.CopyBits(e, br); err != nil {
+				return "", err
+			}
+			return b.String(), nil
+		}, nil
 	case "base64":
-		return func(br bitio.ReaderAtSeeker) (interface{}, error) {
+		return func(br bitio.ReaderAtSeeker) (any, error) {
 			b := &bytes.Buffer{}
 			e := base64.NewEncoder(base64.StdEncoding, b)
-			if _, err := bitioextra.CopyBits(e, br); err != nil {
+			if _, err := bitiox.CopyBits(e, br); err != nil {
 				return "", err
 			}
 			e.Close()
 			return b.String(), nil
-		}
+		}, nil
 	case "truncate":
 		// TODO: configure
-		return func(br bitio.ReaderAtSeeker) (interface{}, error) {
+		return func(br bitio.ReaderAtSeeker) (any, error) {
 			b := &bytes.Buffer{}
-			if _, err := bitioextra.CopyBits(b, bitio.NewLimitReader(br, 1024*8)); err != nil {
+			if _, err := bitiox.CopyBits(b, bitio.NewLimitReader(br, 1024*8)); err != nil {
 				return "", err
 			}
 			return b.String(), nil
-		}
+		}, nil
 	case "string":
-		return func(br bitio.ReaderAtSeeker) (interface{}, error) {
+		return func(br bitio.ReaderAtSeeker) (any, error) {
 			b := &bytes.Buffer{}
-			if _, err := bitioextra.CopyBits(b, br); err != nil {
+			if _, err := bitiox.CopyBits(b, br); err != nil {
 				return "", err
 			}
 			return b.String(), nil
-		}
+		}, nil
 	case "snippet":
-		fallthrough
-	default:
-		return func(br bitio.ReaderAtSeeker) (interface{}, error) {
+		return func(br bitio.ReaderAtSeeker) (any, error) {
 			b := &bytes.Buffer{}
 			e := base64.NewEncoder(base64.StdEncoding, b)
-			if _, err := bitioextra.CopyBits(e, bitio.NewLimitReader(br, 256*8)); err != nil {
+			if _, err := bitiox.CopyBits(e, bitio.NewLimitReader(br, 256*8)); err != nil {
 				return "", err
 			}
 			e.Close()
-
-			brLen, err := bitioextra.Len(br)
+			brLen, err := bitiox.Len(br)
 			if err != nil {
 				return nil, err
 			}
 
-			return fmt.Sprintf("<%s>%s", mathextra.Bits(brLen).StringByteBits(opts.SizeBase), b.String()), nil
-		}
+			return fmt.Sprintf("<%s>%s", mathx.Bits(brLen).StringByteBits(opts.Sizebase), b.String()), nil
+		}, nil
+	case "byte_array":
+		return func(br bitio.ReaderAtSeeker) (any, error) {
+			b := &bytes.Buffer{}
+			if _, err := bitiox.CopyBits(b, br); err != nil {
+				return "", err
+			}
+			var v []any
+			for _, bv := range b.Bytes() {
+				v = append(v, int(bv))
+			}
+			return v, nil
+		}, nil
+	default:
+		return nil, fmt.Errorf("invalid bits format %q", opts.BitsFormat)
 	}
 }
 
-func (i *Interp) lookupState(key string) interface{} {
+func (i *Interp) lookupState(key string) any {
 	if i.state == nil {
 		return nil
 	}
-	m, ok := (*i.state).(map[string]interface{})
+	m, ok := (*i.state).(map[string]any)
 	if !ok {
 		return nil
 	}
@@ -1066,10 +1165,7 @@ func (i *Interp) lookupState(key string) interface{} {
 }
 
 func (i *Interp) includePaths() []string {
-	pathsAny, ok := i.lookupState("include_paths").([]interface{})
-	if !ok {
-		panic("include_paths not slice")
-	}
+	pathsAny, _ := i.lookupState("include_paths").([]any)
 	var paths []string
 	for _, pathAny := range pathsAny {
 		path, ok := pathAny.(string)
@@ -1081,52 +1177,7 @@ func (i *Interp) includePaths() []string {
 	return paths
 }
 
-func (i *Interp) slurps() map[string]interface{} {
-	slurpsAny, _ := i.lookupState("slurps").(map[string]interface{})
+func (i *Interp) slurps() map[string]any {
+	slurpsAny, _ := i.lookupState("slurps").(map[string]any)
 	return slurpsAny
-}
-
-func (i *Interp) Options(v interface{}) Options {
-	var opts Options
-	_ = mapstructure.Decode(v, &opts)
-	opts.ArrayTruncate = mathextra.MaxInt(0, opts.ArrayTruncate)
-	opts.Depth = mathextra.MaxInt(0, opts.Depth)
-	opts.AddrBase = mathextra.ClampInt(2, 36, opts.AddrBase)
-	opts.SizeBase = mathextra.ClampInt(2, 36, opts.SizeBase)
-	opts.LineBytes = mathextra.MaxInt(0, opts.LineBytes)
-	opts.DisplayBytes = mathextra.MaxInt(0, opts.DisplayBytes)
-	opts.Decorator = decoratorFromOptions(opts)
-	opts.BitsFormatFn = bitsFormatFnFromOptions(opts)
-
-	return opts
-}
-
-func (i *Interp) NewColorJSON(opts Options) (*colorjson.Encoder, error) {
-	indent := 2
-	if opts.Compact {
-		indent = 0
-	}
-
-	return colorjson.NewEncoder(
-		opts.Color,
-		false,
-		indent,
-		func(v interface{}) interface{} {
-			if v, ok := toValue(func() Options { return opts }, v); ok {
-				return v
-			}
-			panic(fmt.Sprintf("toValue not a JQValue value: %#v", v))
-		},
-		colorjson.Colors{
-			Reset:     []byte(ansi.Reset.SetString),
-			Null:      []byte(opts.Decorator.Null.SetString),
-			False:     []byte(opts.Decorator.False.SetString),
-			True:      []byte(opts.Decorator.True.SetString),
-			Number:    []byte(opts.Decorator.Number.SetString),
-			String:    []byte(opts.Decorator.String.SetString),
-			ObjectKey: []byte(opts.Decorator.ObjectKey.SetString),
-			Array:     []byte(opts.Decorator.Array.SetString),
-			Object:    []byte(opts.Decorator.Object.SetString),
-		},
-	), nil
 }

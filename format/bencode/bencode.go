@@ -1,29 +1,33 @@
 package bencode
 
+// https://wiki.theory.org/BitTorrentSpecification#Bencoding
+
 import (
 	"embed"
 	"strconv"
 
 	"github.com/wader/fq/format"
-	"github.com/wader/fq/format/registry"
 	"github.com/wader/fq/pkg/decode"
+	"github.com/wader/fq/pkg/interp"
 	"github.com/wader/fq/pkg/scalar"
 )
 
-//go:embed *.jq
+//go:embed bencode.jq
+//go:embed bencode.md
 var bencodeFS embed.FS
 
 func init() {
-	registry.MustRegister(decode.Format{
-		Name:        format.BENCODE,
-		Description: "BitTorrent bencoding",
-		DecodeFn:    decodeBencode,
-		Files:       bencodeFS,
-		ToRepr:      "_bencode_torepr",
-	})
+	interp.RegisterFormat(
+		format.Bencode,
+		&decode.Format{
+			Description: "BitTorrent bencoding",
+			DecodeFn:    decodeBencode,
+			Functions:   []string{"torepr"},
+		})
+	interp.RegisterFS(bencodeFS)
 }
 
-var typeToNames = scalar.StrToSymStr{
+var typeToNames = scalar.StrMapSymStr{
 	"d": "dictionary",
 	"i": "integer",
 	"l": "list",
@@ -60,35 +64,35 @@ func decodeBencodeValue(d *decode.D) {
 	switch typ {
 	case "0", "1", "2", "3", "4", "5", "6", "7", "8", "9":
 		d.SeekRel(-8)
-		length := d.FieldSFn("length", decodeStrIntUntil(':'))
-		d.FieldUTF8("separator", 1, d.AssertStr(":"))
+		length := d.FieldSintFn("length", decodeStrIntUntil(':'))
+		d.FieldUTF8("separator", 1, d.StrAssert(":"))
 		d.FieldUTF8("value", int(length))
 	case "i":
-		d.FieldSFn("value", decodeStrIntUntil('e'))
-		d.FieldUTF8("end", 1, d.AssertStr("e"))
+		d.FieldSintFn("value", decodeStrIntUntil('e'))
+		d.FieldUTF8("end", 1, d.StrAssert("e"))
 	case "l":
 		d.FieldArray("values", func(d *decode.D) {
-			for d.PeekBits(8) != 'e' {
+			for d.PeekUintBits(8) != 'e' {
 				d.FieldStruct("value", decodeBencodeValue)
 			}
 		})
-		d.FieldUTF8("end", 1, d.AssertStr("e"))
+		d.FieldUTF8("end", 1, d.StrAssert("e"))
 	case "d":
 		d.FieldArray("pairs", func(d *decode.D) {
-			for d.PeekBits(8) != 'e' {
+			for d.PeekUintBits(8) != 'e' {
 				d.FieldStruct("pair", func(d *decode.D) {
 					d.FieldStruct("key", decodeBencodeValue)
 					d.FieldStruct("value", decodeBencodeValue)
 				})
 			}
 		})
-		d.FieldUTF8("end", 1, d.AssertStr("e"))
+		d.FieldUTF8("end", 1, d.StrAssert("e"))
 	default:
 		d.Fatalf("unknown type %v", typ)
 	}
 }
 
-func decodeBencode(d *decode.D, in interface{}) interface{} {
+func decodeBencode(d *decode.D) any {
 	decodeBencodeValue(d)
 	return nil
 }

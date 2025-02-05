@@ -1,6 +1,7 @@
 package interp
 
 import (
+	"fmt"
 	"math/big"
 
 	"github.com/wader/fq/internal/ansi"
@@ -9,7 +10,7 @@ import (
 
 var PlainDecorator = Decorator{
 	Column:     "|",
-	ValueColor: func(v interface{}) ansi.Code { return ansi.None },
+	ValueColor: func(v any) ansi.Code { return ansi.None },
 	ByteColor:  func(b byte) ansi.Code { return ansi.None },
 }
 
@@ -41,24 +42,31 @@ func decoratorFromOptions(opts Options) Decorator {
 
 		d.Error = ansi.FromString(colors["error"])
 
-		d.ValueColor = func(v interface{}) ansi.Code {
+		d.ValueColor = func(v any) ansi.Code {
 			switch vv := v.(type) {
 			case bool:
 				if vv {
 					return d.True
 				}
 				return d.False
-			case string, bitio.Reader:
+			case string,
+				bitio.Reader,
+				Binary:
 				return d.String
-			case nil:
-				return d.Null
 			case int, float64, int64, uint64:
 				// TODO: clean up number types
 				return d.Number
 			case *big.Int:
 				return d.Number
+			case []any:
+				return d.Array
+			case map[string]any:
+				return d.Object
+			case nil:
+				return d.Null
+
 			default:
-				panic("unreachable")
+				panic(fmt.Sprintf("unreachable %v (%T)", v, v))
 			}
 		}
 		byteDefaultColor := ansi.FromString("")
@@ -76,7 +84,7 @@ func decoratorFromOptions(opts Options) Decorator {
 		}
 		d.ByteColor = func(b byte) ansi.Code { return byteColors[b] }
 	} else {
-		d.ValueColor = func(v interface{}) ansi.Code { return ansi.None }
+		d.ValueColor = func(v any) ansi.Code { return ansi.None }
 		d.ByteColor = func(b byte) ansi.Code { return ansi.None }
 	}
 
@@ -101,7 +109,7 @@ type Decorator struct {
 
 	Error ansi.Code
 
-	ValueColor func(v interface{}) ansi.Code
+	ValueColor func(v any) ansi.Code
 	ByteColor  func(b byte) ansi.Code
 
 	Column string

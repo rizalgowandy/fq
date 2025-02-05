@@ -1,44 +1,66 @@
 linters:
-  enable:
-    - revive
-    - errname
-    - goimports
-    - nilerr
-    - forcetypeassert
-    - asciicheck
-    - bodyclose
-    - durationcheck
-    - errorlint
-    - noctx
-    - misspell
-    - exportloopref
-    - unconvert
-    - unparam
-    - wastedassign
-    - makezero
-    - exhaustive
-    - gosec
-    - nolintlint
-    - nakedret
-    - predeclared
-    - tagliatelle
-
-run:
-  skip-dirs:
-    - dev
-    - doc
+    enable:
+        - asciicheck
+        - bodyclose
+        - durationcheck
+        - errname
+        - errorlint
+        - exhaustive
+        - forcetypeassert
+        - goimports
+        - gosec
+        - makezero
+        - misspell
+        - nakedret
+        - nilerr
+        - noctx
+        - nolintlint
+        - nosprintfhostport
+        - predeclared
+        - revive
+        - tagliatelle
+        - unconvert
+        - unparam
+        - wastedassign
+        - staticcheck
+        - govet
+        - copyloopvar
 
 linters-settings:
-  misspell:
-    ignore-words:
-      # elf RELA
-      - rela
-      - equalisation
-      - synchronisation
-  exhaustive:
-    default-signifies-exhaustive: true
-  gosec:
-    excludes:
-      # allow md5
-      - G401
-      - G501
+    revive:
+        rules:
+            - name: unused-parameter
+              disabled: true
+    exhaustive:
+        default-signifies-exhaustive: true
+    gosec:
+        excludes:
+            - G401
+            - G501
+            - G115
+            - G406
+            - G506
+    misspell:
+        ignore-words:
+            # elf RELA
+            - rela
+            - equalisation
+            - synchronisation
+    govet:
+        enable-all: true
+        disable:
+            - fieldalignment
+            - shadow
+    staticcheck:
+        checks: ["all"]
+
+issues:
+    exclude-dirs:
+        # allow md5
+        - dev
+        - doc
+        # ignore warnings in code from crypto/tls and zmap/zcrypto
+        - format/tls/tlsdecrypt
+
+run:
+    timeout: 5m

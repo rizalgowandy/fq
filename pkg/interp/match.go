@@ -5,24 +5,18 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/wader/fq/internal/gojqextra"
-	"github.com/wader/fq/internal/ioextra"
+	"github.com/wader/fq/internal/gojqx"
+	"github.com/wader/fq/internal/iox"
 	"github.com/wader/fq/pkg/bitio"
 	"github.com/wader/fq/pkg/ranges"
 	"github.com/wader/gojq"
 )
 
 func init() {
-	functionRegisterFns = append(functionRegisterFns, func(i *Interp) []Function {
-		return []Function{
-			{"_match_binary", 1, 2, nil, i._binaryMatch},
-		}
-	})
+	RegisterIter2("_match_binary", (*Interp)._binaryMatch)
 }
 
-func (i *Interp) _binaryMatch(c interface{}, a []interface{}) gojq.Iter {
-	var ok bool
-
+func (i *Interp) _binaryMatch(c any, pattern any, flags string) gojq.Iter {
 	bv, err := toBinary(c)
 	if err != nil {
 		return gojq.NewIter(err)
@@ -32,11 +26,11 @@ func (i *Interp) _binaryMatch(c interface{}, a []interface{}) gojq.Iter {
 	var byteRunes bool
 	var global bool
 
-	switch a0 := a[0].(type) {
+	switch pattern := pattern.(type) {
 	case string:
-		re = a0
+		re = pattern
 	default:
-		reBuf, err := toBytes(a0)
+		reBuf, err := toBytes(pattern)
 		if err != nil {
 			return gojq.NewIter(err)
 		}
@@ -45,16 +39,8 @@ func (i *Interp) _binaryMatch(c interface{}, a []interface{}) gojq.Iter {
 			reRs = append(reRs, rune(b))
 		}
 		byteRunes = true
-		// escape paratheses runes etc
+		// escape parentheses runes etc
 		re = regexp.QuoteMeta(string(reRs))
-	}
-
-	var flags string
-	if len(a) > 1 {
-		flags, ok = a[1].(string)
-		if !ok {
-			return gojq.NewIter(gojqextra.FuncTypeNameError{Name: "find", Typ: "string"})
-		}
 	}
 
 	if strings.Contains(flags, "b") {
@@ -64,7 +50,7 @@ func (i *Interp) _binaryMatch(c interface{}, a []interface{}) gojq.Iter {
 
 	// TODO: err to string
 	// TODO: extract to regexpextra? "all" FindReaderSubmatchIndex that can iter?
-	sre, err := gojqextra.CompileRegexp(re, "gimb", flags)
+	sre, err := gojqx.CompileRegexp(re, "gimb", flags)
 	if err != nil {
 		return gojq.NewIter(err)
 	}
@@ -84,14 +70,14 @@ func (i *Interp) _binaryMatch(c interface{}, a []interface{}) gojq.Iter {
 	// will match the byte \0xff
 	if byteRunes {
 		// byte mode, read each byte as a rune
-		rr = ioextra.ByteRuneReader{RS: bitio.NewIOReadSeeker(br)}
+		rr = iox.ByteRuneReader{RS: bitio.NewIOReadSeeker(br)}
 	} else {
-		rr = ioextra.RuneReadSeeker{RS: bitio.NewIOReadSeeker(br)}
+		rr = iox.RuneReadSeeker{RS: bitio.NewIOReadSeeker(br)}
 	}
 
 	var off int64
 	prevOff := int64(-1)
-	return iterFn(func() (interface{}, bool) {
+	return iterFn(func() (any, bool) {
 		// TODO: correct way to handle empty match for binary, move one byte forward?
 		// > "asdasd" | [match(""; "g")], [(tobytes | match(""; "g"))] | length
 		// 7
@@ -114,12 +100,12 @@ func (i *Interp) _binaryMatch(c interface{}, a []interface{}) gojq.Iter {
 			return nil, false
 		}
 
-		var captures []interface{}
-		var firstCapture map[string]interface{}
+		var captures []any
+		var firstCapture map[string]any
 
 		for i := 0; i < len(l)/2; i++ {
 			start, end := l[i*2], l[i*2+1]
-			capture := map[string]interface{}{
+			capture := map[string]any{
 				"offset": int(off) + start,
 				"length": end - start,
 			}

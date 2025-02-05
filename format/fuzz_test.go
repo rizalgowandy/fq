@@ -1,5 +1,3 @@
-//go:build fuzz
-
 package format_test
 
 import (
@@ -8,13 +6,11 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
 
 	_ "github.com/wader/fq/format/all"
-	"github.com/wader/fq/format/registry"
 	"github.com/wader/fq/pkg/decode"
 	"github.com/wader/fq/pkg/interp"
 )
@@ -27,7 +23,7 @@ func (fuzzFS) Open(name string) (fs.File, error) {
 
 type fuzzTest struct {
 	b []byte
-	f decode.Format
+	f *decode.Format
 }
 
 type fuzzTestInput struct {
@@ -49,8 +45,8 @@ func (ft *fuzzTest) Platform() interp.Platform { return interp.Platform{} }
 func (ft *fuzzTest) Stdin() interp.Input {
 	return fuzzTestInput{FileReader: interp.FileReader{R: bytes.NewBuffer(ft.b)}}
 }
-func (ft *fuzzTest) Stdout() interp.Output        { return fuzzTestOutput{ioutil.Discard} }
-func (ft *fuzzTest) Stderr() interp.Output        { return fuzzTestOutput{ioutil.Discard} }
+func (ft *fuzzTest) Stdout() interp.Output        { return fuzzTestOutput{io.Discard} }
+func (ft *fuzzTest) Stderr() interp.Output        { return fuzzTestOutput{io.Discard} }
 func (ft *fuzzTest) InterruptChan() chan struct{} { return nil }
 func (ft *fuzzTest) Environ() []string            { return nil }
 func (ft *fuzzTest) Args() []string {
@@ -69,23 +65,27 @@ func (ft *fuzzTest) Readline(opts interp.ReadlineOpts) (string, error) {
 }
 
 func FuzzFormats(f *testing.F) {
+	if os.Getenv("FUZZTEST") == "" {
+		f.Skip("run with FUZZTEST=1 to fuzz")
+	}
+
 	i := 0
 
-	filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
+	if err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
 		if filepath.Base(path) != "testdata" {
 			return nil
 		}
 
-		filepath.Walk(path, func(path string, info os.FileInfo, err error) error {
+		if err := filepath.Walk(path, func(path string, info os.FileInfo, err error) error {
 			if filepath.Ext(path) == ".fqtest" {
 				return nil
 			}
 			if st, err := os.Stat(path); err != nil || st.IsDir() {
-				return nil
+				return err
 			}
 
-			b, err := ioutil.ReadFile(path)
-			if err != nil {
+			b, readErr := os.ReadFile(path)
+			if readErr != nil {
 				f.Fatal(err)
 			}
 
@@ -94,26 +94,41 @@ func FuzzFormats(f *testing.F) {
 			i++
 
 			return nil
-		})
+		}); err != nil {
+			f.Fatal(f)
+		}
 		return nil
-	})
+	}); err != nil {
+		f.Fatal(f)
+	}
 
-	gi := 0
-	g := registry.Default.MustAll()
+	fi := 0
+	var g *decode.Group
+
+	if n := os.Getenv("GROUP"); n != "" {
+		var err error
+		g, err = interp.DefaultRegistry.Group(n)
+		if err != nil {
+			f.Fatal(err)
+		}
+		f.Logf("GROUP=%s", n)
+	} else {
+		g = interp.DefaultRegistry.MustAll()
+	}
 
 	f.Fuzz(func(t *testing.T, b []byte) {
-		fz := &fuzzTest{b: b, f: g[gi]}
-		q, err := interp.New(fz, registry.Default)
+		fz := &fuzzTest{b: b, f: g.Formats[fi]}
+		q, err := interp.New(fz, interp.DefaultRegistry)
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		_ = q.Main(context.Background(), fz.Stdout(), "dev")
+		_ = q.Main(context.Background(), fz.Stdout(), "fuzz")
 		// if err != nil {
 		// 	// TODO: expect error
 		// 	t.Fatal(err)
 		// }
 
-		gi = (gi + 1) % len(g)
+		fi = (fi + 1) % len(g.Formats)
 	})
 }

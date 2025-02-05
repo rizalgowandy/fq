@@ -8,3 +8,4 @@ def _msgpack_torepr:
   elif .type | . == "bin8" or . == "bin16" or . == "bin32" then .value | tostring
   else .value | tovalue
   end;
+

@@ -5,17 +5,18 @@ package mpeg
 
 import (
 	"github.com/wader/fq/format"
-	"github.com/wader/fq/format/registry"
 	"github.com/wader/fq/pkg/decode"
+	"github.com/wader/fq/pkg/interp"
 	"github.com/wader/fq/pkg/scalar"
 )
 
 func init() {
-	registry.MustRegister(decode.Format{
-		Name:        format.MPEG_PES_PACKET,
-		Description: "MPEG Packetized elementary stream packet",
-		DecodeFn:    pesPacketDecode,
-	})
+	interp.RegisterFormat(
+		format.MPEG_PES_Packet,
+		&decode.Format{
+			Description: "MPEG Packetized elementary stream packet",
+			DecodeFn:    pesPacketDecode,
+		})
 }
 
 const (
@@ -30,45 +31,50 @@ type subStreamPacket struct {
 	buf    []byte
 }
 
-var startAndStreamNames = scalar.URangeToScalar{
-	{Range: [2]uint64{0x00, 0x00}, S: scalar.S{Sym: "Picture"}},
-	{Range: [2]uint64{0x01, 0xaf}, S: scalar.S{Sym: "Slice"}},
-	{Range: [2]uint64{0xb0, 0xb1}, S: scalar.S{Sym: "Reserved"}},
-	{Range: [2]uint64{0xb2, 0xb2}, S: scalar.S{Sym: "User data"}},
-	{Range: [2]uint64{0xb3, 0xb3}, S: scalar.S{Sym: "SequenceHeader"}},
-	{Range: [2]uint64{0xb4, 0xb4}, S: scalar.S{Sym: "SequenceError"}},
-	{Range: [2]uint64{0xb5, 0xb5}, S: scalar.S{Sym: "Extension"}},
-	{Range: [2]uint64{0xb6, 0xb6}, S: scalar.S{Sym: "Reserved"}},
-	{Range: [2]uint64{0xb7, 0xb7}, S: scalar.S{Sym: "SequenceEnd"}},
-	{Range: [2]uint64{0xb8, 0xb8}, S: scalar.S{Sym: "GroupOfPictures"}},
-	{Range: [2]uint64{0xb9, 0xb9}, S: scalar.S{Sym: "ProgramEnd"}},
-	{Range: [2]uint64{0xba, 0xba}, S: scalar.S{Sym: "PackHeader"}},
-	{Range: [2]uint64{0xbb, 0xbb}, S: scalar.S{Sym: "SystemHeader"}},
-	{Range: [2]uint64{0xbc, 0xbc}, S: scalar.S{Sym: "ProgramStreamMap"}},
-	{Range: [2]uint64{0xbd, 0xbd}, S: scalar.S{Sym: "PrivateStream1"}},
-	{Range: [2]uint64{0xbe, 0xbe}, S: scalar.S{Sym: "PaddingStream"}},
-	{Range: [2]uint64{0xbf, 0xbf}, S: scalar.S{Sym: "PrivateStream2"}},
-	{Range: [2]uint64{0xc0, 0xdf}, S: scalar.S{Sym: "MPEG1OrMPEG2AudioStream"}},
-	{Range: [2]uint64{0xe0, 0xef}, S: scalar.S{Sym: "MPEG1OrMPEG2VideoStream"}},
-	{Range: [2]uint64{0xf0, 0xf0}, S: scalar.S{Sym: "ECMStream"}},
-	{Range: [2]uint64{0xf1, 0xf1}, S: scalar.S{Sym: "EMMStream"}},
-	{Range: [2]uint64{0xf2, 0xf2}, S: scalar.S{Sym: "ITU-T Rec. H.222.0 | ISO/IEC 13818-1 Annex A or ISO/IEC 13818-6_DSMCC_stream"}},
-	{Range: [2]uint64{0xf3, 0xf3}, S: scalar.S{Sym: "ISO/IEC_13522_stream"}},
-	{Range: [2]uint64{0xf4, 0xf4}, S: scalar.S{Sym: "ITU-T Rec. H.222.1 type A"}},
-	{Range: [2]uint64{0xf5, 0xf5}, S: scalar.S{Sym: "ITU-T Rec. H.222.1 type B"}},
-	{Range: [2]uint64{0xf6, 0xf6}, S: scalar.S{Sym: "ITU-T Rec. H.222.1 type C"}},
-	{Range: [2]uint64{0xf7, 0xf7}, S: scalar.S{Sym: "ITU-T Rec. H.222.1 type D"}},
-	{Range: [2]uint64{0xf8, 0xf8}, S: scalar.S{Sym: "ITU-T Rec. H.222.1 type E"}},
-	{Range: [2]uint64{0xf9, 0xf9}, S: scalar.S{Sym: "Ancillary_stream"}},
-	{Range: [2]uint64{0xfa, 0xfe}, S: scalar.S{Sym: "Reserved"}},
-	{Range: [2]uint64{0xff, 0xff}, S: scalar.S{Sym: "Program Stream Directory"}},
+var startAndStreamNames = scalar.UintRangeToScalar{
+	{Range: [2]uint64{0x00, 0x00}, S: scalar.Uint{Sym: "picture"}},
+	{Range: [2]uint64{0x01, 0xaf}, S: scalar.Uint{Sym: "slice"}},
+	{Range: [2]uint64{0xb0, 0xb1}, S: scalar.Uint{Sym: "reserved"}},
+	{Range: [2]uint64{0xb2, 0xb2}, S: scalar.Uint{Sym: "user_data"}},
+	{Range: [2]uint64{0xb3, 0xb3}, S: scalar.Uint{Sym: "sequence_header"}},
+	{Range: [2]uint64{0xb4, 0xb4}, S: scalar.Uint{Sym: "sequence_error"}},
+	{Range: [2]uint64{0xb5, 0xb5}, S: scalar.Uint{Sym: "extension"}},
+	{Range: [2]uint64{0xb6, 0xb6}, S: scalar.Uint{Sym: "reserved"}},
+	{Range: [2]uint64{0xb7, 0xb7}, S: scalar.Uint{Sym: "sequence_end"}},
+	{Range: [2]uint64{0xb8, 0xb8}, S: scalar.Uint{Sym: "group_of_pictures"}},
+	{Range: [2]uint64{0xb9, 0xb9}, S: scalar.Uint{Sym: "program_end"}},
+	{Range: [2]uint64{0xba, 0xba}, S: scalar.Uint{Sym: "pack_header"}},
+	{Range: [2]uint64{0xbb, 0xbb}, S: scalar.Uint{Sym: "system_header"}},
+	{Range: [2]uint64{0xbc, 0xbc}, S: scalar.Uint{Sym: "program_stream_map"}},
+	{Range: [2]uint64{0xbd, 0xbd}, S: scalar.Uint{Sym: "private_stream1"}},
+	{Range: [2]uint64{0xbe, 0xbe}, S: scalar.Uint{Sym: "padding_stream"}},
+	{Range: [2]uint64{0xbf, 0xbf}, S: scalar.Uint{Sym: "private_stream2"}},
+	{Range: [2]uint64{0xc0, 0xdf}, S: scalar.Uint{Sym: "audio_stream"}},
+	{Range: [2]uint64{0xe0, 0xef}, S: scalar.Uint{Sym: "video_stream"}},
+	{Range: [2]uint64{0xf0, 0xf0}, S: scalar.Uint{Sym: "ecm_stream"}},
+	{Range: [2]uint64{0xf1, 0xf1}, S: scalar.Uint{Sym: "emm_stream"}},
+	{Range: [2]uint64{0xf2, 0xf2}, S: scalar.Uint{Sym: "itu_t_rec_h_222_0"}},
+	{Range: [2]uint64{0xf3, 0xf3}, S: scalar.Uint{Sym: "iso_iec_13522_stream"}},
+	{Range: [2]uint64{0xf4, 0xf4}, S: scalar.Uint{Sym: "itu_t_rec_h_222_1_type_a"}},
+	{Range: [2]uint64{0xf5, 0xf5}, S: scalar.Uint{Sym: "itu_t_rec_h_222_1_type_b"}},
+	{Range: [2]uint64{0xf6, 0xf6}, S: scalar.Uint{Sym: "itu_t_rec_h_222_1_type_c"}},
+	{Range: [2]uint64{0xf7, 0xf7}, S: scalar.Uint{Sym: "itu_t_rec_h_222_1_type_d"}},
+	{Range: [2]uint64{0xf8, 0xf8}, S: scalar.Uint{Sym: "itu_t_rec_h_222_1_type_e"}},
+	{Range: [2]uint64{0xf9, 0xf9}, S: scalar.Uint{Sym: "ancillary_stream"}},
+	{Range: [2]uint64{0xfa, 0xfe}, S: scalar.Uint{Sym: "reserved"}},
+	{Range: [2]uint64{0xff, 0xff}, S: scalar.Uint{Sym: "program_stream_directory"}},
 }
 
-func pesPacketDecode(d *decode.D, in interface{}) interface{} {
-	var v interface{}
+var mpegVersion = scalar.UintMapDescription{
+	0b01: "MPEG2",
+	0b10: "MPEG1",
+}
 
-	d.FieldU24("prefix", d.AssertU(0b0000_0000_0000_0000_0000_0001), scalar.Bin)
-	startCode := d.FieldU8("start_code", startAndStreamNames, scalar.Hex)
+func pesPacketDecode(d *decode.D) any {
+	var v any
+
+	d.FieldU24("prefix", d.UintAssert(0b0000_0000_0000_0000_0000_0001), scalar.UintBin)
+	startCode := d.FieldU8("start_code", startAndStreamNames, scalar.UintHex)
 
 	switch {
 	case startCode == sequenceHeader:
@@ -92,25 +98,33 @@ func pesPacketDecode(d *decode.D, in interface{}) interface{} {
 
 		}
 	case startCode == packHeader:
-		d.FieldStruct("scr", func(d *decode.D) {
-			d.FieldU2("skip0")
-			scr0 := d.FieldU3("scr0")
-			d.FieldU1("skip1")
-			scr1 := d.FieldU15("scr1")
-			d.FieldU1("skip2")
-			scr2 := d.FieldU15("scr2")
-			d.FieldU1("skip3")
+		isMPEG2 := d.PeekUintBits(2) == 0b01
+		if isMPEG2 {
+			d.FieldU2("marker_bits0", mpegVersion)
+		} else {
+			d.FieldU4("marker_bits0", mpegVersion)
+		}
+		scr0 := d.FieldU3("system_clock0")
+		d.FieldU1("marker_bits1")
+		scr1 := d.FieldU15("system_clock1")
+		d.FieldU1("marker_bits2")
+		scr2 := d.FieldU15("system_clock2")
+		d.FieldU1("marker_bits3")
+		if isMPEG2 {
 			d.FieldU9("scr_ext")
-			d.FieldU1("skip4")
-			scr := scr0<<30 | scr1<<15 | scr2
-			d.FieldValueU("scr", scr)
-		})
+		}
+		d.FieldU1("marker_bits4")
+		scr := scr0<<30 | scr1<<15 | scr2
+		d.FieldValueUint("scr", scr)
 		d.FieldU22("mux_rate")
-		d.FieldU2("skip0")
-		d.FieldU5("reserved")
-		packStuffingLength := d.FieldU3("pack_stuffing_length")
-		if packStuffingLength > 0 {
-			d.FieldRawLen("stuffing", int64(packStuffingLength*8))
+		d.FieldU1("marker_bits5")
+		if isMPEG2 {
+			d.FieldU1("marker_bits6")
+			d.FieldU5("reserved")
+			packStuffingLength := d.FieldU3("pack_stuffing_length")
+			if packStuffingLength > 0 {
+				d.FieldRawLen("stuffing", int64(packStuffingLength*8))
+			}
 		}
 	case startCode == systemHeader:
 		d.FieldU16("length")
@@ -127,7 +141,7 @@ func pesPacketDecode(d *decode.D, in interface{}) interface{} {
 		d.FieldU1("packet_rate_restriction_flag")
 		d.FieldU7("reserved")
 		d.FieldArray("stream_bound_entries", func(d *decode.D) {
-			for d.PeekBits(1) == 1 {
+			for d.PeekUintBits(1) == 1 {
 				d.FieldStruct("stream_bound_entry", func(d *decode.D) {
 					d.FieldU8("stream_id")
 					d.FieldU2("skip0")
@@ -177,14 +191,18 @@ func pesPacketDecode(d *decode.D, in interface{}) interface{} {
 
 					v = subStreamPacket{
 						number: int(substreamNumber),
-						buf:    d.MustReadAllBits(substreamBR),
+						buf:    d.ReadAllBits(substreamBR),
 					}
 				})
 			})
 		default:
-			d.FieldRawLen("data", dataLen)
+			d.FieldRawLen("stream_data", dataLen)
 		}
 	default:
+		// nop
+	}
+
+	if d.BitsLeft() > 0 {
 		d.FieldRawLen("data", d.BitsLeft())
 	}
 

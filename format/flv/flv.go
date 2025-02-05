@@ -3,21 +3,20 @@
 package flv
 
 // TODO: make it useful
-
-// https://www.adobe.com/content/dam/acom/en/devnet/flv/video_file_format_spec_v10.pdf
+// https://rtmp.veriskope.com/pdf/video_file_format_spec_v10.pdf
 
 import (
 	"github.com/wader/fq/format"
-	"github.com/wader/fq/format/registry"
 	"github.com/wader/fq/pkg/decode"
+	"github.com/wader/fq/pkg/registry"
 	"github.com/wader/fq/pkg/scalar"
 )
 
 func init() {
-	registry.MustRegister(decode.Format{
+	registry.MustRegister(&decode.Format{
 		Name:        format.FLV,
 		Description: "Flash video",
-		Groups:      []string{format.PROBE},
+		Groups:      []*decode.Group{format.Probe},
 		DecodeFn:    flvDecode,
 	})
 }
@@ -28,7 +27,7 @@ const (
 	scriptDataObject = 18
 )
 
-var tagTypeNames = scalar.UToSymStr{
+var tagTypeNames = scalar.UintMapSymStr{
 	audioData:        "audioData",
 	videoData:        "videoData",
 	scriptDataObject: "scriptDataObject",
@@ -50,7 +49,7 @@ const (
 	typeLongString  = 12
 )
 
-var typeNames = scalar.UToSymStr{
+var typeNames = scalar.UintMapSymStr{
 	typeNumber:      "Number",
 	typeBoolean:     "Boolean",
 	typeString:      "String",
@@ -66,7 +65,7 @@ var typeNames = scalar.UToSymStr{
 	typeLongString:  "LongString",
 }
 
-func flvDecode(d *decode.D, in interface{}) interface{} {
+func flvDecode(d *decode.D) any {
 	var fieldScriptDataObject func()
 	var fieldScriptDataVariable func(d *decode.D, name string)
 
@@ -147,11 +146,11 @@ func flvDecode(d *decode.D, in interface{}) interface{} {
 		})
 	}
 
-	d.FieldUTF8("signature", 3, d.AssertStr("FLV"))
+	d.FieldUTF8("signature", 3, d.StrAssert("FLV"))
 	d.FieldU8("version")
-	d.FieldU5("type_flags_reserved", d.AssertU(0))
+	d.FieldU5("type_flags_reserved", d.UintAssert(0))
 	d.FieldU1("type_flags_audio")
-	d.FieldU1("type_flags_reserved", d.AssertU(0))
+	d.FieldU1("type_flags_reserved", d.UintAssert(0))
 	d.FieldU1("type_flags_video")
 	dataOffset := d.FieldU32("data_offset")
 
